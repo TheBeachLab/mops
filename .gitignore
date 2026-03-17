@@ -4,3 +4,4 @@ playwright-state/
 *.log
 .DS_Store
 output/
+.worktrees/
