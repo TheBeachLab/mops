@@ -2,9 +2,10 @@
 
 import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
-import { join, extname, dirname } from 'node:path';
+import { join, extname, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
@@ -13,26 +14,89 @@ import * as programs from './programs.js';
 import * as modules from './modules.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const MODS_DIR = join(__dirname, '..', 'mods');
+const PROJECT_ROOT = join(__dirname, '..');
 
 // Parse CLI arguments
 const args = process.argv.slice(2);
 let port = 8080;
 let headless = false;
-let initialBranch = null;
+let modsPath = null;
+let modsBranch = null;
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--port' && args[i + 1]) {
     port = parseInt(args[i + 1], 10);
     i++;
   }
-  if (args[i] === '--branch' && args[i + 1]) {
-    initialBranch = args[i + 1];
+  if (args[i] === '--mods-path' && args[i + 1]) {
+    modsPath = args[i + 1];
     i++;
+  }
+  if (args[i] === '--mods-branch' && args[i + 1]) {
+    modsBranch = args[i + 1];
+    i++;
+  }
+  if (args[i] === '--branch') {
+    console.error(`[mods-mcp] Warning: --branch is deprecated, use --mods-branch instead`);
+    if (args[i + 1]) { modsBranch = args[i + 1]; i++; }
   }
   if (args[i] === '--headless') headless = true;
 }
 
-// Helper to run git commands in the mods submodule
+// Resolve mods directory path (relative to PROJECT_ROOT, not cwd)
+function resolveModsDir() {
+  if (modsPath) {
+    const candidate = resolve(PROJECT_ROOT, modsPath);
+    if (!existsSync(candidate)) {
+      console.error(`[mods-mcp] Error: Mods path not found: ${candidate}`);
+      process.exit(1);
+    }
+    if (!existsSync(join(candidate, 'index.html'))) {
+      console.error(`[mods-mcp] Error: ${candidate} doesn't look like a mods CE checkout (missing index.html)`);
+      process.exit(1);
+    }
+    const missing = [];
+    if (!existsSync(join(candidate, 'modules'))) missing.push('modules/');
+    if (!existsSync(join(candidate, 'programs'))) missing.push('programs/');
+    if (missing.length > 0) {
+      console.error(`[mods-mcp] Error: ${candidate} is missing: ${missing.join(', ')}`);
+      process.exit(1);
+    }
+    return candidate;
+  }
+
+  const candidates = [join(PROJECT_ROOT, '..', 'mods'), join(PROJECT_ROOT, 'mods')];
+  for (const candidate of candidates) {
+    if (existsSync(join(candidate, 'index.html')) &&
+        existsSync(join(candidate, 'modules')) &&
+        existsSync(join(candidate, 'programs'))) {
+      return candidate;
+    }
+  }
+  console.error(`[mods-mcp] Error: Mods CE checkout not found.`);
+  console.error(`  Searched: ${candidates.join(', ')}`);
+  console.error(`  Use --mods-path <path> to specify the location of your mods CE checkout.`);
+  process.exit(1);
+}
+
+const MODS_DIR = resolveModsDir();
+
+// Validate branch if specified
+if (modsBranch) {
+  try {
+    const actual = execSync('git branch --show-current', { cwd: MODS_DIR, encoding: 'utf-8' }).trim();
+    if (actual !== modsBranch) {
+      console.error(`[mods-mcp] Warning: Expected mods branch '${modsBranch}' but repo is on '${actual}'`);
+    }
+  } catch {
+    console.error(`[mods-mcp] Warning: Could not check mods branch (git not available or not a git repo)`);
+  }
+}
+
+// Initialize modules with resolved path
+programs.init(MODS_DIR);
+modules.init(MODS_DIR);
+
+// Helper to run git commands in the mods repo
 function gitInMods(cmd) {
   return execSync(cmd, { cwd: MODS_DIR, encoding: 'utf-8' }).trim();
 }
@@ -398,7 +462,7 @@ mcpServer.tool(
 // --- Tool: save_program ---
 mcpServer.tool(
   'save_program',
-  'Save the current program state to a file',
+  'Save the current program state to the linked mods repo (programs/custom/)',
   { name: z.string().describe('File name for the saved program (no extension)') },
   async ({ name }) => {
     if (!browser.isLaunched()) {
@@ -416,7 +480,7 @@ mcpServer.tool(
 // --- Tool: update_mods ---
 mcpServer.tool(
   'update_mods',
-  'Pull the latest changes from the remote mods repository for the current branch',
+  'Pull the latest changes in the linked mods repository for the current branch',
   {},
   async () => {
     try {
@@ -439,7 +503,7 @@ mcpServer.tool(
 // --- Tool: switch_branch ---
 mcpServer.tool(
   'switch_branch',
-  'Switch the mods submodule to a different branch and pull latest changes',
+  'Switch the linked mods repository to a different branch and pull latest changes',
   {
     branch: z.string().describe('Branch name to switch to (e.g., "master", "fran")'),
     list: z.boolean().optional().describe('If true, list available branches instead of switching')
@@ -464,6 +528,9 @@ mcpServer.tool(
       gitInMods(`git checkout ${branch}`);
       gitInMods(`git pull origin ${branch}`);
       const commit = gitInMods('git log --oneline -1');
+      if (modsBranch && branch !== modsBranch) {
+        console.error(`[mods-mcp] Warning: Switched to '${branch}' but startup expected '${modsBranch}'`);
+      }
       // Reload browser to pick up new code
       if (browser.isLaunched()) {
         const page = browser.getPage();
@@ -483,35 +550,25 @@ mcpServer.tool(
 
 // --- Startup ---
 async function start() {
-  // Switch to initial branch if specified
-  if (initialBranch) {
-    try {
-      gitInMods('git fetch origin');
-      gitInMods(`git checkout ${initialBranch}`);
-      gitInMods(`git pull origin ${initialBranch}`);
-      console.error(`[mods-mcp-v2] Switched mods to branch: ${initialBranch}`);
-    } catch (err) {
-      console.error(`[mods-mcp-v2] Failed to switch branch: ${err.message}`);
-    }
-  }
+  console.error(`[mods-mcp] Mods CE path: ${MODS_DIR}`);
 
   // Start HTTP server
   httpServer.listen(port, () => {
-    console.error(`[mods-mcp-v2] HTTP server serving Mods CE at http://localhost:${port}/`);
+    console.error(`[mods-mcp] HTTP server serving Mods CE at http://localhost:${port}/`);
   });
 
   // Browser is launched on demand via the launch_browser tool
-  console.error(`[mods-mcp-v2] Browser will launch on demand (use launch_browser tool)`);
+  console.error(`[mods-mcp] Browser will launch on demand (use launch_browser tool)`);
 
   // Start MCP server on stdio
   const transport = new StdioServerTransport();
   await mcpServer.connect(transport);
-  console.error('[mods-mcp-v2] MCP server running on stdio');
+  console.error('[mods-mcp] MCP server running on stdio');
 }
 
 // --- Cleanup ---
 async function cleanup() {
-  console.error('[mods-mcp-v2] Shutting down...');
+  console.error('[mods-mcp] Shutting down...');
   await browser.close();
   httpServer.close();
   process.exit(0);
@@ -521,6 +578,6 @@ process.on('SIGINT', cleanup);
 process.on('SIGTERM', cleanup);
 
 start().catch(err => {
-  console.error(`[mods-mcp-v2] Fatal error: ${err.message}`);
+  console.error(`[mods-mcp] Fatal error: ${err.message}`);
   process.exit(1);
 });
