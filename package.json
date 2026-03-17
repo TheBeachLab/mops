@@ -9,7 +9,7 @@
   },
   "scripts": {
     "start": "node src/server.js",
-    "setup": "git submodule update --init && npx playwright install"
+    "setup": "npx playwright install"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
