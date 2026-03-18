@@ -63,8 +63,8 @@ export async function launch(modsUrl, headless = false) {
       console.error(`[mops] Auto-selecting device: ${match.name}`);
       await cdpSession.send('DeviceAccess.selectPrompt', { id, deviceId: match.id });
     } else {
-      console.error(`[mops] No matching device found, canceling prompt. Discovered: ${devices.map(d => d.name).join(', ')}`);
-      await cdpSession.send('DeviceAccess.cancelPrompt', { id });
+      // No match — leave the picker open for the user to select manually
+      console.error(`[mops] No auto-match found. Leaving device picker open for manual selection. Discovered: ${devices.map(d => d.name).join(', ')}`);
     }
   });
 
@@ -81,6 +81,30 @@ export function setDeviceFilters(filters, names) {
 
 export function getDiscoveredDevices() {
   return discoveredDevices;
+}
+
+export async function getGrantedDevices() {
+  if (!page) return [];
+  try {
+    return await page.evaluate(async () => {
+      const devices = [];
+      if (navigator.usb && navigator.usb.getDevices) {
+        const usbDevices = await navigator.usb.getDevices();
+        for (const d of usbDevices) {
+          devices.push({
+            name: [d.manufacturerName, d.productName].filter(Boolean).join(' ') || 'Unknown USB device',
+            vendorId: d.vendorId,
+            productId: d.productId,
+            serialNumber: d.serialNumber || null,
+            type: 'usb'
+          });
+        }
+      }
+      return devices;
+    });
+  } catch {
+    return [];
+  }
 }
 
 export async function loadProgram(modsUrl, programPath, srcUrl) {

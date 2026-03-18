@@ -394,15 +394,25 @@ mcpServer.tool('launch_browser',
 );
 
 mcpServer.tool('list_devices',
-  'List USB/serial devices discovered during WebUSB/WebSerial prompts. Devices appear here after a workflow triggers a device picker.',
+  'List connected USB/serial devices. Shows devices discovered from picker prompts and devices granted via WebUSB. Use after a workflow to see what the user connected.',
   {},
   async () => {
     if (!browser.isLaunched()) return { content: [{ type: 'text', text: 'Error: Browser not launched.' }], isError: true };
-    const devices = browser.getDiscoveredDevices();
-    if (devices.length === 0) {
-      return { content: [{ type: 'text', text: 'No devices discovered yet. Devices are detected when a workflow triggers a WebUSB/WebSerial prompt (e.g., sending output to a machine).' }] };
+
+    // Get devices from CDP prompts
+    const discovered = browser.getDiscoveredDevices();
+
+    // Also query granted WebUSB devices from the browser
+    const granted = await browser.getGrantedDevices();
+
+    const result = {};
+    if (discovered.length > 0) result.discoveredInPrompts = discovered;
+    if (granted.length > 0) result.grantedUsbDevices = granted;
+
+    if (discovered.length === 0 && granted.length === 0) {
+      return { content: [{ type: 'text', text: 'No devices found. Devices appear after a workflow triggers WebUSB/WebSerial (e.g., sending output to a machine).' }] };
     }
-    return { content: [{ type: 'text', text: JSON.stringify(devices, null, 2) }] };
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }
 );
 
