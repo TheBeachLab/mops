@@ -121,6 +121,24 @@ Optional flags via args:
 | `save_program` | Extract the current program state as v2 JSON |
 | `export_file` | Retrieve the most recently generated output file |
 
+## User Profile
+
+MOPS stores your machine inventory and preferences in `~/.mops/profile.json` (local per user, never committed to the repo). Tell the LLM about your machines in natural language:
+
+- *"I have a Roland GX-24 vinyl cutter"* → saves to your profile
+- *"Remove the Epilog laser"* → removes it
+- *"What machines do I have?"* → reads your profile
+
+When you ask to do something like *"cut a sticker"*, the LLM calls `find_machine` to match the task against your machines and find the right Mods program automatically.
+
+## Device Auto-Selection (WebUSB / WebSerial)
+
+When a Mods program sends output to a physical machine, Chrome normally shows a device picker dialog. MOPS intercepts this via CDP and auto-selects the right device by fuzzy-matching your profile machine names against what Chrome reports.
+
+For example, if your profile has `"Roland GX-24"` and Chrome shows `"Roland DG GX-24"` in the picker, MOPS matches the keywords and selects it automatically — no manual configuration needed.
+
+For edge cases where fuzzy matching isn't enough, you can set an explicit `deviceName` on a machine via `update_profile`. Use `list_devices` to see what device names Chrome has discovered.
+
 ## Example: PCB Milling Workflow
 
 Here's the sequence to generate a milling toolpath from an SVG PCB design:
