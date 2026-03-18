@@ -1,7 +1,8 @@
 // server.js — MCP server for remote mods CE interaction
 
-import { stat } from 'node:fs/promises';
-import { extname } from 'node:path';
+import { stat, readFile, writeFile, mkdir } from 'node:fs/promises';
+import { extname, join } from 'node:path';
+import { homedir } from 'node:os';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
@@ -192,6 +193,24 @@ function parseModuleNameId(module_name) {
   return { name, id };
 }
 
+// --- User profile ---
+const PROFILE_DIR = join(homedir(), '.mops');
+const PROFILE_PATH = join(PROFILE_DIR, 'profile.json');
+
+async function loadProfile() {
+  try {
+    const data = await readFile(PROFILE_PATH, 'utf-8');
+    return JSON.parse(data);
+  } catch {
+    return { machines: [], preferences: {} };
+  }
+}
+
+async function saveProfile(profile) {
+  await mkdir(PROFILE_DIR, { recursive: true });
+  await writeFile(PROFILE_PATH, JSON.stringify(profile, null, 2));
+}
+
 // --- Tools ---
 
 mcpServer.tool('get_server_status', 'Get server health, browser state, mods URL, and loaded program', {},
@@ -209,6 +228,69 @@ mcpServer.tool('get_server_status', 'Get server health, browser state, mods URL,
       } catch { /* ignore */ }
     }
     return { content: [{ type: 'text', text: JSON.stringify(status, null, 2) }] };
+  }
+);
+
+mcpServer.tool('get_profile', 'Get user profile: machines, preferences, and other saved settings', {},
+  async () => {
+    const profile = await loadProfile();
+    if (profile.machines.length === 0 && Object.keys(profile.preferences).length === 0) {
+      return { content: [{ type: 'text', text: 'No profile configured yet. Use update_profile to add your machines and preferences.' }] };
+    }
+    return { content: [{ type: 'text', text: JSON.stringify(profile, null, 2) }] };
+  }
+);
+
+mcpServer.tool('update_profile',
+  'Add, remove, or update machines and preferences in the user profile. Stored locally at ~/.mops/profile.json.',
+  {
+    action: z.enum(['add_machine', 'remove_machine', 'set_preference', 'remove_preference']).describe('What to do'),
+    machine: z.object({
+      name: z.string().describe('Machine name (e.g., "Roland GX-24")'),
+      type: z.string().describe('What it does (e.g., "vinyl cutter", "CNC mill", "3D printer", "laser cutter")'),
+      program: z.string().optional().describe('Mods program path if known (e.g., "programs/machines/Roland/GX-24/cut vinyl")'),
+      notes: z.string().optional().describe('Any extra info (e.g., "max area 24x12 inches", "in room 302")')
+    }).optional().describe('Machine details (for add_machine/remove_machine)'),
+    preference: z.object({
+      key: z.string().describe('Preference name (e.g., "default_units", "output_directory")'),
+      value: z.string().describe('Preference value')
+    }).optional().describe('Preference key-value (for set_preference/remove_preference)')
+  },
+  async ({ action, machine, preference }) => {
+    const profile = await loadProfile();
+
+    if (action === 'add_machine') {
+      if (!machine) return { content: [{ type: 'text', text: 'Error: machine is required for add_machine' }], isError: true };
+      const existing = profile.machines.findIndex(m => m.name.toLowerCase() === machine.name.toLowerCase());
+      if (existing >= 0) profile.machines[existing] = machine;
+      else profile.machines.push(machine);
+      await saveProfile(profile);
+      return { content: [{ type: 'text', text: `Machine "${machine.name}" saved. You now have ${profile.machines.length} machine(s).` }] };
+    }
+
+    if (action === 'remove_machine') {
+      if (!machine) return { content: [{ type: 'text', text: 'Error: machine is required for remove_machine' }], isError: true };
+      const before = profile.machines.length;
+      profile.machines = profile.machines.filter(m => m.name.toLowerCase() !== machine.name.toLowerCase());
+      if (profile.machines.length === before) return { content: [{ type: 'text', text: `Machine "${machine.name}" not found in profile.` }] };
+      await saveProfile(profile);
+      return { content: [{ type: 'text', text: `Machine "${machine.name}" removed. ${profile.machines.length} machine(s) remaining.` }] };
+    }
+
+    if (action === 'set_preference') {
+      if (!preference) return { content: [{ type: 'text', text: 'Error: preference is required for set_preference' }], isError: true };
+      profile.preferences[preference.key] = preference.value;
+      await saveProfile(profile);
+      return { content: [{ type: 'text', text: `Preference "${preference.key}" set to "${preference.value}".` }] };
+    }
+
+    if (action === 'remove_preference') {
+      if (!preference) return { content: [{ type: 'text', text: 'Error: preference is required for remove_preference' }], isError: true };
+      if (!(preference.key in profile.preferences)) return { content: [{ type: 'text', text: `Preference "${preference.key}" not found.` }] };
+      delete profile.preferences[preference.key];
+      await saveProfile(profile);
+      return { content: [{ type: 'text', text: `Preference "${preference.key}" removed.` }] };
+    }
   }
 );
 

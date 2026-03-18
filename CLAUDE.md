@@ -65,6 +65,8 @@ The MCP server connects to a remote mods CE deployment (default: `https://modspr
 | Tool | Description |
 |------|-------------|
 | `get_server_status` | Server health, browser state, mods URL, loaded program info |
+| `get_profile` | Get user profile: machines, preferences, and saved settings |
+| `update_profile` | Add/remove machines and preferences (stored at `~/.mops/profile.json`) |
 | `launch_browser` | Launch browser and navigate to the mods CE deployment |
 | `list_programs` | List available programs from remote manifest |
 | `list_modules` | List available modules from remote manifest |

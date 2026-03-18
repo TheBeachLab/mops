@@ -104,6 +104,8 @@ Optional flags via args:
 | Tool | Description |
 |------|-------------|
 | `get_server_status` | Server health, browser state, mods URL, loaded program |
+| `get_profile` | Get user profile: machines, preferences, and saved settings |
+| `update_profile` | Add/remove machines and preferences (stored at `~/.mops/profile.json`) |
 | `launch_browser` | Launch browser and navigate to the Mods CE deployment |
 | `list_programs` | List available programs by category |
 | `list_modules` | List available modules by category |
