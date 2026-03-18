@@ -249,6 +249,7 @@ mcpServer.tool('update_profile',
       name: z.string().describe('Machine name (e.g., "Roland GX-24")'),
       type: z.string().describe('What it does (e.g., "vinyl cutter", "CNC mill", "3D printer", "laser cutter")'),
       program: z.string().optional().describe('Mods program path if known (e.g., "programs/machines/Roland/GX-24/cut vinyl")'),
+      deviceName: z.string().optional().describe('USB/serial device name as shown in Chrome device picker (e.g., "Roland DG SRM-20"). Used for WebUSB/WebSerial auto-selection.'),
       notes: z.string().optional().describe('Any extra info (e.g., "max area 24x12 inches", "in room 302")')
     }).optional().describe('Machine details (for add_machine/remove_machine)'),
     preference: z.object({
@@ -294,13 +295,99 @@ mcpServer.tool('update_profile',
   }
 );
 
+mcpServer.tool('find_machine',
+  'Find the best matching machine from the user profile for a given task, and match it to an available Mods program.',
+  {
+    task: z.string().describe('What the user wants to do (e.g., "cut a sticker", "mill a PCB", "3D print a case")')
+  },
+  async ({ task }) => {
+    const profile = await loadProfile();
+    if (profile.machines.length === 0) {
+      return { content: [{ type: 'text', text: 'No machines in profile. Use update_profile to add your machines first.' }] };
+    }
+    const programs = await getProgramsManifest();
+    const taskLower = task.toLowerCase();
+
+    // Build machine results with matching programs
+    const results = [];
+    for (const machine of profile.machines) {
+      const machineResult = { ...machine, matchingPrograms: [] };
+
+      // If machine has a program path set, include it directly
+      if (machine.program) {
+        const found = programs.find(p => p.path === machine.program);
+        if (found) machineResult.matchingPrograms.push(found);
+      }
+
+      // Search programs by machine name keywords
+      const keywords = machine.name.toLowerCase().split(/[\s-]+/);
+      for (const prog of programs) {
+        const progPath = prog.path.toLowerCase();
+        const progName = (prog.name || '').toLowerCase();
+        const match = keywords.some(kw => kw.length > 2 && (progPath.includes(kw) || progName.includes(kw)));
+        if (match && !machineResult.matchingPrograms.some(p => p.path === prog.path)) {
+          machineResult.matchingPrograms.push(prog);
+        }
+      }
+      results.push(machineResult);
+    }
+
+    // Score relevance to the task
+    const taskKeywords = {
+      'sticker': ['vinyl', 'cut vinyl', 'cutter'],
+      'vinyl': ['vinyl', 'cut vinyl', 'cutter'],
+      'cut': ['cut', 'laser', 'vinyl', 'cutter'],
+      'mill': ['mill', 'pcb', 'milling', 'cnc'],
+      'pcb': ['mill', 'pcb', 'traces', 'outline'],
+      'print': ['print', '3d', 'printer'],
+      '3d': ['print', '3d', 'printer'],
+      'engrave': ['laser', 'engrave'],
+      'laser': ['laser', 'cut', 'engrave'],
+      'scan': ['scan', 'scanner'],
+      'route': ['route', 'router', 'cnc', 'shopbot']
+    };
+
+    // Find machines whose type matches the task
+    const scored = results.map(m => {
+      let score = 0;
+      const mType = m.type.toLowerCase();
+      const mName = m.name.toLowerCase();
+      const mNotes = (m.notes || '').toLowerCase();
+      for (const word of taskLower.split(/\s+/)) {
+        if (mType.includes(word) || mName.includes(word) || mNotes.includes(word)) score += 2;
+        const related = taskKeywords[word] || [];
+        for (const r of related) {
+          if (mType.includes(r) || mName.includes(r) || mNotes.includes(r)) score += 1;
+        }
+      }
+      return { ...m, relevanceScore: score };
+    });
+
+    scored.sort((a, b) => b.relevanceScore - a.relevanceScore);
+
+    return { content: [{ type: 'text', text: JSON.stringify(scored, null, 2) }] };
+  }
+);
+
 mcpServer.tool('launch_browser',
-  'Launch the Chromium browser and navigate to the mods CE deployment. Must be called before browser-dependent tools.', {},
+  'Launch the Chromium browser and navigate to the mods CE deployment. Must be called before browser-dependent tools. Automatically sets up WebUSB/WebSerial device auto-selection from the user profile.',
+  {},
   async () => {
     if (browser.isLaunched()) return { content: [{ type: 'text', text: `Browser already running at ${modsUrl}` }] };
     try {
+      // Load device name filters from profile before launching
+      const profile = await loadProfile();
+      const filters = profile.machines
+        .filter(m => m.deviceName)
+        .map(m => m.deviceName);
+      browser.setDeviceFilters(filters);
+
       await browser.launch(modsUrl, headless);
-      return { content: [{ type: 'text', text: `Browser launched (${headless ? 'headless' : 'headed'}) at ${modsUrl}` }] };
+      const msg = `Browser launched (${headless ? 'headless' : 'headed'}) at ${modsUrl}`;
+      const deviceMsg = filters.length > 0
+        ? `. WebUSB/WebSerial auto-select enabled for: ${filters.join(', ')}`
+        : '. No device names in profile — WebUSB/WebSerial prompts will be canceled. Add deviceName to machines with update_profile to enable auto-selection.';
+      return { content: [{ type: 'text', text: msg + deviceMsg }] };
     } catch (err) {
       return { content: [{ type: 'text', text: `Browser launch failed: ${err.message}. Run "npx playwright install chromium" to install browsers.` }], isError: true };
     }

@@ -106,7 +106,8 @@ Optional flags via args:
 | `get_server_status` | Server health, browser state, mods URL, loaded program |
 | `get_profile` | Get user profile: machines, preferences, and saved settings |
 | `update_profile` | Add/remove machines and preferences (stored at `~/.mops/profile.json`) |
-| `launch_browser` | Launch browser and navigate to the Mods CE deployment |
+| `find_machine` | Match a task description to a machine in your profile + available Mods programs |
+| `launch_browser` | Launch browser, set up WebUSB/WebSerial device auto-selection from profile |
 | `list_programs` | List available programs by category |
 | `list_modules` | List available modules by category |
 | `get_module_info` | Parse a module's inputs, outputs, and types |

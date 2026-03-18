@@ -7,6 +7,8 @@ import { extname } from 'node:path';
 let browserInstance = null;
 let page = null;
 let downloads = [];
+let cdpSession = null;
+let deviceNameFilters = [];
 
 export async function launch(modsUrl, headless = false) {
   browserInstance = await chromium.launch({ headless, channel: 'chrome' });
@@ -24,10 +26,35 @@ export async function launch(modsUrl, headless = false) {
     });
   });
 
+  // Set up CDP session for WebUSB/WebSerial device auto-selection
+  cdpSession = await page.context().newCDPSession(page);
+  await cdpSession.send('DeviceAccess.enable');
+  cdpSession.on('DeviceAccess.deviceRequestPrompted', async (event) => {
+    const { id, devices } = event;
+    console.error(`[mops] Device prompt: ${devices.map(d => d.name).join(', ')}`);
+    const match = devices.find(d =>
+      deviceNameFilters.some(filter => d.name.toLowerCase().includes(filter.toLowerCase()))
+    );
+    if (match) {
+      console.error(`[mops] Auto-selecting device: ${match.name}`);
+      await cdpSession.send('DeviceAccess.selectPrompt', { id, deviceId: match.id });
+    } else if (deviceNameFilters.length > 0) {
+      console.error(`[mops] No matching device for filters: ${deviceNameFilters.join(', ')}`);
+      await cdpSession.send('DeviceAccess.cancelPrompt', { id });
+    } else {
+      console.error(`[mops] No device filters set, canceling prompt`);
+      await cdpSession.send('DeviceAccess.cancelPrompt', { id });
+    }
+  });
+
   await page.goto(modsUrl, { waitUntil: 'load' });
   await page.waitForFunction(() => typeof window.mods_prog_load === 'function', { timeout: 15000 });
 
   return page;
+}
+
+export function setDeviceFilters(filters) {
+  deviceNameFilters = filters;
 }
 
 export async function loadProgram(modsUrl, programPath, srcUrl) {

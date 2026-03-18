@@ -67,7 +67,8 @@ The MCP server connects to a remote mods CE deployment (default: `https://modspr
 | `get_server_status` | Server health, browser state, mods URL, loaded program info |
 | `get_profile` | Get user profile: machines, preferences, and saved settings |
 | `update_profile` | Add/remove machines and preferences (stored at `~/.mops/profile.json`) |
-| `launch_browser` | Launch browser and navigate to the mods CE deployment |
+| `find_machine` | Match a task to a user's machine and available Mods program |
+| `launch_browser` | Launch browser, set up WebUSB/WebSerial auto-selection from profile |
 | `list_programs` | List available programs from remote manifest |
 | `list_modules` | List available modules from remote manifest |
 | `get_module_info` | Parse module file(s) to extract name, inputs, outputs with types |
