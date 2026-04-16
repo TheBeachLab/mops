@@ -569,7 +569,7 @@ async function readImageDimensions(filePath) {
 }
 
 mcpServer.tool('set_physical_size',
-  'Set the physical output size for the loaded image. Reads pixel dimensions from the file, calculates the correct DPI, and sets it on the reader module.',
+  'Set the physical output size for a loaded PNG image. Reads pixel dimensions from the file header, calculates the correct DPI, and sets it on the reader module. Only works with PNG — vector formats (DXF, HPGL, SVG) have physical dimensions defined by their data.',
   {
     width: z.number().describe('Desired physical width'),
     height: z.number().optional().describe('Desired physical height (if omitted, aspect ratio is preserved from width)'),
@@ -580,7 +580,11 @@ mcpServer.tool('set_physical_size',
     if (!loadedProgram) return { content: [{ type: 'text', text: 'Error: No program loaded.' }], isError: true };
     if (!lastLoadedFile) return { content: [{ type: 'text', text: 'Error: No image file loaded. Use load_file first.' }], isError: true };
 
-    // Read pixel dimensions directly from the file (PNG IHDR / SVG viewBox)
+    // Read pixel dimensions directly from the file (PNG only — DPI controls physical size)
+    const ext = extname(lastLoadedFile).toLowerCase();
+    if (ext !== '.png') {
+      return { content: [{ type: 'text', text: `Error: set_physical_size only works with PNG files. For vector formats (DXF, HPGL, SVG), physical dimensions come from the file data — DPI only controls rasterization resolution.` }], isError: true };
+    }
     const dims = await readImageDimensions(lastLoadedFile);
     if (!dims) return { content: [{ type: 'text', text: `Error: Cannot read dimensions from ${lastLoadedFile}` }], isError: true };
 

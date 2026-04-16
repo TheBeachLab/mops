@@ -117,7 +117,7 @@ Optional flags via args:
 | `set_parameter` | Set a parameter value in a module |
 | `trigger_action` | Click a button in a module (calculate, presets, etc.) |
 | `load_file` | Load a file into a reader module (SVG/PNG via postMessage, others via file input) |
-| `set_physical_size` | Set output size in mm/cm/in — calculates and sets the correct DPI automatically |
+| `set_physical_size` | Set output size in mm/cm/in for PNG files — calculates and sets the correct DPI automatically |
 | `create_program` | Build a custom program from modules and connections |
 | `save_program` | Extract the current program state as v2 JSON |
 | `export_file` | Retrieve the most recently generated output file |
