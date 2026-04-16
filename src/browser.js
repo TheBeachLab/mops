@@ -130,24 +130,30 @@ export async function postMessageFile(filePath) {
     return { error: `postMessage not supported for ${ext} files. Use setModuleFile for this type.` };
   }
 
-  // Combine listener setup + postMessage in a single evaluate to avoid race conditions
+  // Send file and wait for moduleOutput event (mods broadcasts when a module fires an output)
   const msgType = ext === '.png' ? 'png' : 'svg';
   const payload = ext === '.png' ? fileData.toString('base64') : fileData.toString('utf-8');
-  const ack = await page.evaluate(({ type, data }) => {
+  const outputEvent = await page.evaluate(({ type, data }) => {
     return new Promise(resolve => {
       const handler = (e) => {
-        if (e.data === 'ready') {
+        if (e.data && e.data.type === 'moduleOutput') {
           window.removeEventListener('message', handler);
-          resolve(true);
+          resolve(e.data);
         }
       };
       window.addEventListener('message', handler);
-      setTimeout(() => { window.removeEventListener('message', handler); resolve(false); }, 5000);
+      setTimeout(() => { window.removeEventListener('message', handler); resolve(null); }, 10000);
       window.postMessage({ type, data }, '*');
     });
   }, { type: msgType, data: payload });
 
-  return { success: true, file: filePath, method: 'postMessage', acknowledged: ack };
+  const result = { success: true, file: filePath, method: 'postMessage' };
+  if (outputEvent) {
+    result.module = outputEvent.module;
+    result.output = outputEvent.output;
+    if (outputEvent.data) result.moduleData = outputEvent.data;
+  }
+  return result;
 }
 
 export async function setModuleFile(moduleId, filePath) {
@@ -157,9 +163,28 @@ export async function setModuleFile(moduleId, filePath) {
   if (count === 0) {
     return { error: `No file input found in module ${moduleId}` };
   }
+  // Set up moduleOutput listener before triggering file input
+  const eventPromise = page.evaluate((timeout) => {
+    return new Promise(resolve => {
+      const handler = (e) => {
+        if (e.data && e.data.type === 'moduleOutput') {
+          window.removeEventListener('message', handler);
+          resolve(e.data);
+        }
+      };
+      window.addEventListener('message', handler);
+      setTimeout(() => { window.removeEventListener('message', handler); resolve(null); }, timeout);
+    });
+  }, 10000);
   await input.setInputFiles(filePath);
-  await page.waitForTimeout(2000);
-  return { success: true, file: filePath, method: 'fileInput' };
+  const outputEvent = await eventPromise;
+  const result = { success: true, file: filePath, method: 'fileInput' };
+  if (outputEvent) {
+    result.module = outputEvent.module;
+    result.output = outputEvent.output;
+    if (outputEvent.data) result.moduleData = outputEvent.data;
+  }
+  return result;
 }
 
 export async function getProgramState() {
@@ -335,12 +360,21 @@ export async function extractProgramState() {
   });
 }
 
-export async function waitForImageDimensions(timeout = 10000) {
+export async function waitForModuleOutput({ outputName, moduleName, timeout = 10000 } = {}) {
   if (!page) throw new Error('Browser not launched');
-  await page.waitForFunction(() => {
-    const text = (document.getElementById('modules') || {}).textContent || '';
-    return /[\d.]+\s*x\s*[\d.]+\s*(mm|in)/.test(text);
-  }, { timeout }).catch(() => {});
+  return page.evaluate(({ outputName, moduleName, timeout }) => {
+    return new Promise(resolve => {
+      const handler = (e) => {
+        if (!e.data || e.data.type !== 'moduleOutput') return;
+        if (outputName && e.data.output !== outputName) return;
+        if (moduleName && e.data.module.name !== moduleName) return;
+        window.removeEventListener('message', handler);
+        resolve(e.data);
+      };
+      window.addEventListener('message', handler);
+      setTimeout(() => { window.removeEventListener('message', handler); resolve(null); }, timeout);
+    });
+  }, { outputName, moduleName, timeout });
 }
 
 export async function getImageInfo() {

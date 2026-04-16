@@ -553,8 +553,6 @@ mcpServer.tool('set_physical_size',
     if (!browser.isLaunched()) return { content: [{ type: 'text', text: 'Error: Browser not launched.' }], isError: true };
     if (!loadedProgram) return { content: [{ type: 'text', text: 'Error: No program loaded.' }], isError: true };
 
-    // Wait for image dimensions to appear in the DOM (may not be immediate after load_file)
-    await browser.waitForImageDimensions();
     const imageInfo = await browser.getImageInfo();
     if (imageInfo.error) return { content: [{ type: 'text', text: `Error: ${imageInfo.error}` }], isError: true };
 
