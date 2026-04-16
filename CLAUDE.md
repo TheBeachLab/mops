@@ -78,6 +78,7 @@ The MCP server connects to a remote mods CE deployment (default: `https://modspr
 | `set_parameter` | Set a parameter value on a module by name |
 | `trigger_action` | Click a button in a module (calculate, export, etc.) |
 | `load_file` | Load a file into a reader module (postMessage for SVG/PNG, file input for others) |
+| `set_physical_size` | Set output size in mm/cm/in — calculates and sets correct DPI automatically |
 | `create_program` | Build a new v2 program from module paths and connections |
 | `save_program` | Extract current program state as v2 JSON |
 | `export_file` | Get the most recently downloaded/exported file |

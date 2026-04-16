@@ -542,6 +542,54 @@ mcpServer.tool('load_file',
   }
 );
 
+mcpServer.tool('set_physical_size',
+  'Set the physical output size for the loaded image. Reads pixel dimensions, calculates the correct DPI, and sets it on the reader module. Use this instead of manually calculating DPI.',
+  {
+    width: z.number().describe('Desired physical width'),
+    height: z.number().optional().describe('Desired physical height (if omitted, aspect ratio is preserved from width)'),
+    unit: z.enum(['mm', 'cm', 'in']).default('mm').describe('Unit for width/height')
+  },
+  async ({ width, height, unit }) => {
+    if (!browser.isLaunched()) return { content: [{ type: 'text', text: 'Error: Browser not launched.' }], isError: true };
+    if (!loadedProgram) return { content: [{ type: 'text', text: 'Error: No program loaded.' }], isError: true };
+
+    const imageInfo = await browser.getImageInfo();
+    if (imageInfo.error) return { content: [{ type: 'text', text: `Error: ${imageInfo.error}` }], isError: true };
+
+    // Convert desired width to inches
+    const widthInches = unit === 'mm' ? width / 25.4 : unit === 'cm' ? width / 2.54 : width;
+    const newDpi = Math.round(imageInfo.pixelWidth / widthInches);
+
+    // Set DPI on the reader module
+    const setResult = await browser.setModuleInput(imageInfo.moduleId, 'dpi', String(newDpi));
+    if (setResult.error) return { content: [{ type: 'text', text: `Error setting DPI: ${setResult.error}` }], isError: true };
+
+    // Calculate resulting dimensions for confirmation
+    const rW_mm = (25.4 * imageInfo.pixelWidth / newDpi).toFixed(1);
+    const rH_mm = (25.4 * imageInfo.pixelHeight / newDpi).toFixed(1);
+    const rW_in = (imageInfo.pixelWidth / newDpi).toFixed(3);
+    const rH_in = (imageInfo.pixelHeight / newDpi).toFixed(3);
+
+    const response = {
+      success: true, dpiSet: newDpi,
+      imagePixels: `${imageInfo.pixelWidth} x ${imageInfo.pixelHeight}`,
+      resultingSize: { mm: `${rW_mm} x ${rH_mm} mm`, in: `${rW_in} x ${rH_in} in` }
+    };
+
+    // Warn if requested height doesn't match aspect ratio
+    if (height !== undefined) {
+      const heightInches = unit === 'mm' ? height / 25.4 : unit === 'cm' ? height / 2.54 : height;
+      const actualHeightInches = imageInfo.pixelHeight / newDpi;
+      if (Math.abs(actualHeightInches - heightInches) / heightInches > 0.05) {
+        const actualH = actualHeightInches * (unit === 'mm' ? 25.4 : unit === 'cm' ? 2.54 : 1);
+        response.warning = `Image aspect ratio doesn't match. Height will be ${actualH.toFixed(1)} ${unit} instead of ${height} ${unit}. DPI is set based on width.`;
+      }
+    }
+
+    return { content: [{ type: 'text', text: JSON.stringify(response, null, 2) }] };
+  }
+);
+
 mcpServer.tool('export_file', 'Get the most recently downloaded/exported file from Mods', {},
   async () => {
     const download = browser.getLatestDownload();
