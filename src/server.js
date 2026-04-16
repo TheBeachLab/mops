@@ -548,8 +548,8 @@ async function readImageDimensions(filePath) {
   const ext = extname(filePath).toLowerCase();
   const buf = await readFile(filePath);
   if (ext === '.png') {
-    // PNG IHDR chunk: width at byte 16, height at byte 24 (4-byte big-endian)
-    return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(24) };
+    // PNG IHDR chunk: width at byte 16, height at byte 20 (4-byte big-endian)
+    return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
   }
   // SVG: parse width/height or viewBox
   if (ext === '.svg') {
