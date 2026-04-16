@@ -11,6 +11,7 @@ let cdpSession = null;
 let deviceNameFilters = [];
 let discoveredDevices = [];
 let machineNames = [];
+let lastImageInfo = null;
 
 export async function launch(modsUrl, headless = false) {
   browserInstance = await chromium.launch({ headless, channel: 'chrome' });
@@ -109,6 +110,7 @@ export async function getGrantedDevices() {
 
 export async function loadProgram(modsUrl, programPath, srcUrl) {
   if (!page) throw new Error('Browser not launched');
+  lastImageInfo = null;
   const encodedPath = programPath.split('/').map(encodeURIComponent).join('/');
   let url = `${modsUrl}/?program=${encodedPath}`;
   if (srcUrl) url += `&src=${encodeURIComponent(srcUrl)}`;
@@ -151,7 +153,12 @@ export async function postMessageFile(filePath) {
   if (outputEvent) {
     result.module = outputEvent.module;
     result.output = outputEvent.output;
-    if (outputEvent.data) result.moduleData = outputEvent.data;
+    if (outputEvent.data) {
+      result.moduleData = outputEvent.data;
+      if (outputEvent.data.width && outputEvent.data.height) {
+        lastImageInfo = { ...outputEvent.data, moduleId: outputEvent.module.id, moduleName: outputEvent.module.name };
+      }
+    }
   }
   return result;
 }
@@ -182,7 +189,12 @@ export async function setModuleFile(moduleId, filePath) {
   if (outputEvent) {
     result.module = outputEvent.module;
     result.output = outputEvent.output;
-    if (outputEvent.data) result.moduleData = outputEvent.data;
+    if (outputEvent.data) {
+      result.moduleData = outputEvent.data;
+      if (outputEvent.data.width && outputEvent.data.height) {
+        lastImageInfo = { ...outputEvent.data, moduleId: outputEvent.module.id, moduleName: outputEvent.module.name };
+      }
+    }
   }
   return result;
 }
@@ -378,49 +390,16 @@ export async function waitForModuleOutput({ outputName, moduleName, timeout = 10
 }
 
 export async function getImageInfo() {
-  if (!page) throw new Error('Browser not launched');
-  return page.evaluate(() => {
-    const modulesContainer = document.getElementById('modules');
-    if (!modulesContainer) return { error: 'No modules loaded' };
-
-    // Search ALL modules for a DPI input (don't assume module name)
-    for (let c = 0; c < modulesContainer.childNodes.length; c++) {
-      const mod = modulesContainer.childNodes[c];
-      if (!mod.id || !mod.querySelectorAll) continue;
-
-      for (const input of mod.querySelectorAll('input')) {
-        const prev = input.previousSibling;
-        const label = prev ? prev.textContent.trim() : '';
-        if (!label.toLowerCase().includes('dpi')) continue;
-
-        const currentDpi = parseFloat(input.value);
-        if (!currentDpi || isNaN(currentDpi)) continue;
-
-        // Found DPI — get pixel dimensions from this module's text
-        const text = mod.textContent;
-        const inMatch = text.match(/([\d.]+)\s*x\s*([\d.]+)\s*in/);
-        if (inMatch) {
-          return {
-            moduleId: mod.id, moduleName: mod.dataset.name || '',
-            pixelWidth: Math.round(parseFloat(inMatch[1]) * currentDpi),
-            pixelHeight: Math.round(parseFloat(inMatch[2]) * currentDpi),
-            currentDpi
-          };
-        }
-        const mmMatch = text.match(/([\d.]+)\s*x\s*([\d.]+)\s*mm/);
-        if (mmMatch) {
-          return {
-            moduleId: mod.id, moduleName: mod.dataset.name || '',
-            pixelWidth: Math.round(parseFloat(mmMatch[1]) * currentDpi / 25.4),
-            pixelHeight: Math.round(parseFloat(mmMatch[2]) * currentDpi / 25.4),
-            currentDpi
-          };
-        }
-        return { error: 'DPI parameter found but no image dimensions — load a file first', moduleId: mod.id };
-      }
-    }
-    return { error: 'No module with a DPI parameter found in the loaded program' };
-  });
+  if (!lastImageInfo || !lastImageInfo.width || !lastImageInfo.height) {
+    return { error: 'No image loaded — use load_file first' };
+  }
+  return {
+    moduleId: lastImageInfo.moduleId,
+    moduleName: lastImageInfo.moduleName,
+    pixelWidth: lastImageInfo.width,
+    pixelHeight: lastImageInfo.height,
+    currentDpi: lastImageInfo.dpi
+  };
 }
 
 export function getLatestDownload() {
