@@ -341,48 +341,43 @@ export async function getImageInfo() {
     const modulesContainer = document.getElementById('modules');
     if (!modulesContainer) return { error: 'No modules loaded' };
 
-    // Find reader module (read PNG, read SVG, etc.)
-    let readerMod = null;
+    // Search ALL modules for a DPI input (don't assume module name)
     for (let c = 0; c < modulesContainer.childNodes.length; c++) {
       const mod = modulesContainer.childNodes[c];
-      const name = (mod.dataset && mod.dataset.name || '').toLowerCase();
-      if (name.includes('read')) { readerMod = mod; break; }
-    }
-    if (!readerMod) return { error: 'No image reader module found in the loaded program' };
+      if (!mod.id || !mod.querySelectorAll) continue;
 
-    // Read current DPI from input field
-    let currentDpi = null;
-    for (const input of readerMod.querySelectorAll('input')) {
-      const prev = input.previousSibling;
-      if (prev && prev.textContent && prev.textContent.trim().toLowerCase().includes('dpi')) {
-        currentDpi = parseFloat(input.value);
-        break;
+      for (const input of mod.querySelectorAll('input')) {
+        const prev = input.previousSibling;
+        const label = prev ? prev.textContent.trim() : '';
+        if (!label.toLowerCase().includes('dpi')) continue;
+
+        const currentDpi = parseFloat(input.value);
+        if (!currentDpi || isNaN(currentDpi)) continue;
+
+        // Found DPI — get pixel dimensions from this module's text
+        const text = mod.textContent;
+        const inMatch = text.match(/([\d.]+)\s*x\s*([\d.]+)\s*in/);
+        if (inMatch) {
+          return {
+            moduleId: mod.id, moduleName: mod.dataset.name || '',
+            pixelWidth: Math.round(parseFloat(inMatch[1]) * currentDpi),
+            pixelHeight: Math.round(parseFloat(inMatch[2]) * currentDpi),
+            currentDpi
+          };
+        }
+        const mmMatch = text.match(/([\d.]+)\s*x\s*([\d.]+)\s*mm/);
+        if (mmMatch) {
+          return {
+            moduleId: mod.id, moduleName: mod.dataset.name || '',
+            pixelWidth: Math.round(parseFloat(mmMatch[1]) * currentDpi / 25.4),
+            pixelHeight: Math.round(parseFloat(mmMatch[2]) * currentDpi / 25.4),
+            currentDpi
+          };
+        }
+        return { error: 'DPI parameter found but no image dimensions — load a file first', moduleId: mod.id };
       }
     }
-    if (!currentDpi) return { error: 'No DPI parameter found in reader module', moduleId: readerMod.id };
-
-    // Back-calculate pixel dimensions from displayed inch text + current DPI
-    const text = readerMod.textContent;
-    const inMatch = text.match(/([\d.]+)\s*x\s*([\d.]+)\s*in/);
-    if (inMatch) {
-      return {
-        moduleId: readerMod.id, moduleName: readerMod.dataset.name,
-        pixelWidth: Math.round(parseFloat(inMatch[1]) * currentDpi),
-        pixelHeight: Math.round(parseFloat(inMatch[2]) * currentDpi),
-        currentDpi
-      };
-    }
-    // Fallback: mm text
-    const mmMatch = text.match(/([\d.]+)\s*x\s*([\d.]+)\s*mm/);
-    if (mmMatch) {
-      return {
-        moduleId: readerMod.id, moduleName: readerMod.dataset.name,
-        pixelWidth: Math.round(parseFloat(mmMatch[1]) * currentDpi / 25.4),
-        pixelHeight: Math.round(parseFloat(mmMatch[2]) * currentDpi / 25.4),
-        currentDpi
-      };
-    }
-    return { error: 'No image loaded yet — load a file first', moduleId: readerMod.id };
+    return { error: 'No module with a DPI parameter found in the loaded program' };
   });
 }
 
