@@ -62,6 +62,10 @@ export async function launch(modsUrl, headless = false) {
 
     if (match) {
       console.error(`[mops] Auto-selecting device: ${match.name}`);
+      // Remember exact device name for instant matching on future prompts
+      if (!deviceNameFilters.some(f => f.toLowerCase() === match.name.toLowerCase())) {
+        deviceNameFilters.push(match.name);
+      }
       await cdpSession.send('DeviceAccess.selectPrompt', { id, deviceId: match.id });
     } else {
       // No match — leave the picker open for the user to select manually
