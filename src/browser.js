@@ -120,7 +120,10 @@ export async function loadProgram(modsUrl, programPath, srcUrl) {
     const modules = document.getElementById('modules');
     return modules && modules.childNodes.length > 0;
   }, { timeout: 15000 });
-  await page.waitForTimeout(srcUrl ? 2000 : 500);
+  if (srcUrl) {
+    // Wait for the src file to be processed
+    await waitForProcessingSignal({ timeout: 10000 });
+  }
 }
 
 export async function postMessageFile(filePath) {
@@ -395,6 +398,27 @@ export async function waitForModuleOutput({ outputName, moduleName, timeout = 10
       setTimeout(() => { window.removeEventListener('message', handler); resolve(null); }, timeout);
     });
   }, { outputName, moduleName, timeout });
+}
+
+export async function waitForProcessingSignal({ timeout = 30000 } = {}) {
+  if (!page) throw new Error('Browser not launched');
+  // Race: moduleOutput event vs download vs timeout
+  const beforeCount = downloads.length;
+  const event = await page.evaluate((timeout) => {
+    return new Promise(resolve => {
+      const handler = (e) => {
+        if (e.data && e.data.type === 'moduleOutput') {
+          window.removeEventListener('message', handler);
+          resolve(e.data);
+        }
+      };
+      window.addEventListener('message', handler);
+      setTimeout(() => { window.removeEventListener('message', handler); resolve(null); }, timeout);
+    });
+  }, Math.min(timeout, 3000)); // 3s max on old mods (no moduleOutput)
+  // If no event, check if a download appeared during the wait
+  if (!event && downloads.length > beforeCount) return { signal: 'download' };
+  return event;
 }
 
 export async function getImageInfo() {

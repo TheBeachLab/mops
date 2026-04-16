@@ -512,7 +512,12 @@ mcpServer.tool('trigger_action', 'Click a button in a module (calculate, view, e
     const found = await findModule(name, id);
     if (found.error) return { content: [{ type: 'text', text: found.error }], isError: true };
     const result = await browser.clickModuleButton(found.module.id, action);
-    await new Promise(r => setTimeout(r, 2000));
+    // Wait for processing signal (moduleOutput on new mods, download or 3s fallback on old)
+    const outputEvent = await browser.waitForProcessingSignal({ timeout: 30000 });
+    if (outputEvent) {
+      result.completedModule = outputEvent.module;
+      result.completedOutput = outputEvent.output;
+    }
     const download = browser.getLatestDownload();
     if (download) result.download = { filename: download.suggestedFilename, size: download.content ? download.content.length : 0 };
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
