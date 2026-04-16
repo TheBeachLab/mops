@@ -115,6 +115,7 @@ Optional flags via args:
 | `load_program` | Load a program into the browser, optionally preload a file via src URL |
 | `get_program_state` | Read all modules, parameters, connections, and switch states |
 | `set_parameter` | Set a parameter value in a module |
+| `set_parameters` | Set multiple parameters across modules in a single call |
 | `trigger_action` | Click a button in a module (calculate, presets, etc.) |
 | `load_file` | Load a file into a reader module (SVG/PNG via postMessage, others via file input) |
 | `set_physical_size` | Set output size in mm/cm/in for PNG files — calculates and sets the correct DPI automatically |

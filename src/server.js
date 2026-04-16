@@ -500,6 +500,28 @@ mcpServer.tool('set_parameter', 'Set a parameter value in a specific module',
   }
 );
 
+mcpServer.tool('set_parameters', 'Set multiple parameters across one or more modules in a single call. More efficient than multiple set_parameter calls.',
+  {
+    params: z.array(z.object({
+      module_name: z.string().describe('Module name (or partial match, or name:id for disambiguation)'),
+      parameter: z.string().describe('Parameter label (or partial match)'),
+      value: z.string().describe('New value to set')
+    })).describe('Array of parameters to set')
+  },
+  async ({ params }) => {
+    if (!browser.isLaunched()) return { content: [{ type: 'text', text: 'Error: Browser not launched.' }], isError: true };
+    const results = [];
+    for (const { module_name, parameter, value } of params) {
+      const { name, id } = parseModuleNameId(module_name);
+      const found = await findModule(name, id);
+      if (found.error) { results.push({ module_name, parameter, error: found.error }); continue; }
+      const result = await browser.setModuleInput(found.module.id, parameter, value);
+      results.push({ module_name, parameter, ...result });
+    }
+    return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
+  }
+);
+
 mcpServer.tool('trigger_action', 'Click a button in a module (calculate, view, export, etc.)',
   {
     module_name: z.string().describe('Module name (or partial match, or name:id for disambiguation)'),
