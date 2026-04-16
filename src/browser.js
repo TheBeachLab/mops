@@ -335,6 +335,14 @@ export async function extractProgramState() {
   });
 }
 
+export async function waitForImageDimensions(timeout = 10000) {
+  if (!page) throw new Error('Browser not launched');
+  await page.waitForFunction(() => {
+    const text = (document.getElementById('modules') || {}).textContent || '';
+    return /[\d.]+\s*x\s*[\d.]+\s*(mm|in)/.test(text);
+  }, { timeout }).catch(() => {});
+}
+
 export async function getImageInfo() {
   if (!page) throw new Error('Browser not launched');
   return page.evaluate(() => {
