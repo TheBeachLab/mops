@@ -132,7 +132,9 @@ export async function postMessageFile(filePath) {
     return { error: `postMessage not supported for ${ext} files. Use setModuleFile for this type.` };
   }
 
-  // Send file and wait for moduleOutput event (mods broadcasts when a module fires an output)
+  // Send file and wait for processing signal:
+  // - New mods: moduleOutput event (with data like imageInfo)
+  // - Old mods: 'ready' acknowledgment
   const msgType = ext === '.png' ? 'png' : 'svg';
   const payload = ext === '.png' ? fileData.toString('base64') : fileData.toString('utf-8');
   const outputEvent = await page.evaluate(({ type, data }) => {
@@ -141,6 +143,9 @@ export async function postMessageFile(filePath) {
         if (e.data && e.data.type === 'moduleOutput') {
           window.removeEventListener('message', handler);
           resolve(e.data);
+        } else if (e.data === 'ready') {
+          window.removeEventListener('message', handler);
+          resolve('ready');
         }
       };
       window.addEventListener('message', handler);
@@ -150,7 +155,7 @@ export async function postMessageFile(filePath) {
   }, { type: msgType, data: payload });
 
   const result = { success: true, file: filePath, method: 'postMessage' };
-  if (outputEvent) {
+  if (outputEvent && outputEvent !== 'ready') {
     result.module = outputEvent.module;
     result.output = outputEvent.output;
     if (outputEvent.data) {
@@ -170,13 +175,16 @@ export async function setModuleFile(moduleId, filePath) {
   if (count === 0) {
     return { error: `No file input found in module ${moduleId}` };
   }
-  // Set up moduleOutput listener before triggering file input
+  // Wait for processing signal (moduleOutput on new mods, 'ready' on old, timeout as last resort)
   const eventPromise = page.evaluate((timeout) => {
     return new Promise(resolve => {
       const handler = (e) => {
         if (e.data && e.data.type === 'moduleOutput') {
           window.removeEventListener('message', handler);
           resolve(e.data);
+        } else if (e.data === 'ready') {
+          window.removeEventListener('message', handler);
+          resolve('ready');
         }
       };
       window.addEventListener('message', handler);
@@ -186,7 +194,7 @@ export async function setModuleFile(moduleId, filePath) {
   await input.setInputFiles(filePath);
   const outputEvent = await eventPromise;
   const result = { success: true, file: filePath, method: 'fileInput' };
-  if (outputEvent) {
+  if (outputEvent && outputEvent !== 'ready') {
     result.module = outputEvent.module;
     result.output = outputEvent.output;
     if (outputEvent.data) {
