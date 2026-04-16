@@ -210,6 +210,12 @@ export async function getProgramState() {
           params.push({ label, value: input.value, type: input.type });
         }
       }
+      for (const select of mod.querySelectorAll('select')) {
+        let label = '';
+        const prev = select.previousSibling;
+        if (prev && prev.textContent) label = prev.textContent.trim();
+        params.push({ label, value: select.value, type: 'select', options: Array.from(select.options).map(o => o.value) });
+      }
       const buttons = [];
       for (const btn of mod.querySelectorAll('button')) {
         buttons.push(btn.textContent.trim());
@@ -230,21 +236,39 @@ export async function setModuleInput(moduleId, paramName, value) {
   return page.evaluate(({ moduleId, paramName, value }) => {
     const mod = document.getElementById(moduleId);
     if (!mod) return { error: `Module ${moduleId} not found` };
+    const paramLower = paramName.toLowerCase();
+
+    // Check <input> elements
     for (const input of mod.querySelectorAll('input')) {
       const prev = input.previousSibling;
       const label = prev ? prev.textContent.trim() : '';
-      if (label.includes(paramName)) {
+      if (label.toLowerCase().includes(paramLower)) {
         if (input.type === 'checkbox') {
           input.checked = (value === 'true' || value === '1' || value === 'on');
-          input.dispatchEvent(new Event('change'));
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.dispatchEvent(new Event('change', { bubbles: true }));
           return { success: true, label, type: 'checkbox', newValue: input.checked };
         } else {
           input.value = value;
-          input.dispatchEvent(new Event('change'));
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.dispatchEvent(new Event('change', { bubbles: true }));
           return { success: true, label, newValue: value };
         }
       }
     }
+
+    // Check <select> elements
+    for (const select of mod.querySelectorAll('select')) {
+      const prev = select.previousSibling;
+      const label = prev ? prev.textContent.trim() : '';
+      if (label.toLowerCase().includes(paramLower)) {
+        select.value = value;
+        select.dispatchEvent(new Event('input', { bubbles: true }));
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+        return { success: true, label, type: 'select', newValue: select.value };
+      }
+    }
+
     return { error: `Parameter "${paramName}" not found in module ${moduleId}` };
   }, { moduleId, paramName, value: String(value) });
 }
