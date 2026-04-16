@@ -140,9 +140,24 @@ For example, if your profile has `"Roland GX-24"` and Chrome shows `"Roland DG G
 
 For edge cases where fuzzy matching isn't enough, you can set an explicit `deviceName` on a machine via `update_profile`. Use `list_devices` to see what device names Chrome has discovered.
 
+## Example: Vinyl Sticker Cutting
+
+Cut a 10×10 cm sticker from a PNG file on a Roland GX-24:
+
+```
+1. find_machine              → "cut a sticker" matches Roland GX-24 in your profile
+2. launch_browser            → opens Chrome, auto-selects device from profile
+3. load_program              → "programs/machines/Roland/GX-GS 24 vinyl cutters/cut"
+4. load_file                 → load PNG into reader module (via postMessage)
+5. set_physical_size         → width: 10, unit: "cm" → calculates DPI from PNG pixel dimensions
+6. trigger_action            → click "calculate" on the toolpath module
+```
+
+`set_physical_size` reads pixel dimensions directly from the PNG file header and computes the exact DPI. No manual DPI math needed.
+
 ## Example: PCB Milling Workflow
 
-Here's the sequence to generate a milling toolpath from an SVG PCB design:
+Generate a milling toolpath from an SVG PCB design:
 
 ```
 1. get_server_status         → verify browser is connected
