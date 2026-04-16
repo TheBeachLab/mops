@@ -320,12 +320,14 @@ mcpServer.tool('find_machine',
         if (found) machineResult.matchingPrograms.push(found);
       }
 
-      // Search programs by machine name keywords
-      const keywords = machine.name.toLowerCase().split(/[\s-]+/);
+      // Search programs by machine name keywords.
+      // Split on spaces only — model numbers like "GX-24" and "SRM-20" must stay
+      // as single tokens so they match model-specific program paths.
+      const keywords = machine.name.toLowerCase().split(/\s+/).filter(w => w.length > 2);
       for (const prog of programs) {
         const progPath = prog.path.toLowerCase();
         const progName = (prog.name || '').toLowerCase();
-        const match = keywords.some(kw => kw.length > 2 && (progPath.includes(kw) || progName.includes(kw)));
+        const match = keywords.some(kw => progPath.includes(kw) || progName.includes(kw));
         if (match && !machineResult.matchingPrograms.some(p => p.path === prog.path)) {
           machineResult.matchingPrograms.push(prog);
         }
