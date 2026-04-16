@@ -53,7 +53,7 @@ export async function launch(modsUrl, headless = false) {
       match = devices.find(d => {
         const dLower = d.name.toLowerCase();
         return machineNames.some(mName => {
-          const keywords = mName.toLowerCase().split(/[\s-]+/).filter(w => w.length > 2);
+          const keywords = mName.toLowerCase().split(/\s+/).filter(w => w.length > 2);
           const matched = keywords.filter(kw => dLower.includes(kw));
           return matched.length >= 2; // at least 2 keywords must match
         });
