@@ -165,6 +165,7 @@ async function parseModule(modulePath, includeSource) {
 
 // --- State ---
 let loadedProgram = null;
+let lastLoadedFile = null;
 
 // --- MCP Server ---
 const mcpServer = new McpServer({ name: 'mops', version: '0.2.0' });
@@ -529,6 +530,7 @@ mcpServer.tool('load_file',
     try { await stat(file_path); } catch {
       return { content: [{ type: 'text', text: `Error: File not found: ${file_path}` }], isError: true };
     }
+    lastLoadedFile = file_path;
     const ext = extname(file_path).toLowerCase();
     if (ext === '.svg' || ext === '.png') {
       const result = await browser.postMessageFile(file_path);
@@ -542,8 +544,27 @@ mcpServer.tool('load_file',
   }
 );
 
+async function readImageDimensions(filePath) {
+  const ext = extname(filePath).toLowerCase();
+  const buf = await readFile(filePath);
+  if (ext === '.png') {
+    // PNG IHDR chunk: width at byte 16, height at byte 24 (4-byte big-endian)
+    return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(24) };
+  }
+  // SVG: parse width/height or viewBox
+  if (ext === '.svg') {
+    const svg = buf.toString('utf-8');
+    const vbMatch = svg.match(/viewBox=["'][\d.]+\s+[\d.]+\s+([\d.]+)\s+([\d.]+)["']/);
+    if (vbMatch) return { width: parseFloat(vbMatch[1]), height: parseFloat(vbMatch[2]) };
+    const wMatch = svg.match(/width=["']([\d.]+)/);
+    const hMatch = svg.match(/height=["']([\d.]+)/);
+    if (wMatch && hMatch) return { width: parseFloat(wMatch[1]), height: parseFloat(hMatch[1]) };
+  }
+  return null;
+}
+
 mcpServer.tool('set_physical_size',
-  'Set the physical output size for the loaded image. Reads pixel dimensions, calculates the correct DPI, and sets it on the reader module. Use this instead of manually calculating DPI.',
+  'Set the physical output size for the loaded image. Reads pixel dimensions from the file, calculates the correct DPI, and sets it on the reader module.',
   {
     width: z.number().describe('Desired physical width'),
     height: z.number().optional().describe('Desired physical height (if omitted, aspect ratio is preserved from width)'),
@@ -552,35 +573,40 @@ mcpServer.tool('set_physical_size',
   async ({ width, height, unit }) => {
     if (!browser.isLaunched()) return { content: [{ type: 'text', text: 'Error: Browser not launched.' }], isError: true };
     if (!loadedProgram) return { content: [{ type: 'text', text: 'Error: No program loaded.' }], isError: true };
+    if (!lastLoadedFile) return { content: [{ type: 'text', text: 'Error: No image file loaded. Use load_file first.' }], isError: true };
 
-    const imageInfo = await browser.getImageInfo();
-    if (imageInfo.error) return { content: [{ type: 'text', text: `Error: ${imageInfo.error}` }], isError: true };
+    // Read pixel dimensions directly from the file (PNG IHDR / SVG viewBox)
+    const dims = await readImageDimensions(lastLoadedFile);
+    if (!dims) return { content: [{ type: 'text', text: `Error: Cannot read dimensions from ${lastLoadedFile}` }], isError: true };
 
-    // Convert desired width to inches — use exact float DPI (module accepts parseFloat)
+    // Find the module with a DPI parameter
+    const state = await browser.getProgramState();
+    const dpiModule = state.find(m => m.params.some(p => p.label.toLowerCase().includes('dpi')));
+    if (!dpiModule) return { content: [{ type: 'text', text: 'Error: No module with a DPI parameter found in the loaded program.' }], isError: true };
+
+    // Calculate exact DPI from desired width
     const widthInches = unit === 'mm' ? width / 25.4 : unit === 'cm' ? width / 2.54 : width;
-    const newDpi = imageInfo.pixelWidth / widthInches;
+    const newDpi = dims.width / widthInches;
 
-    // Set DPI on the reader module (3 decimal places avoids floating point noise)
-    const dpiStr = newDpi.toFixed(3);
-    const setResult = await browser.setModuleInput(imageInfo.moduleId, 'dpi', dpiStr);
+    // Set DPI (3 decimal places avoids floating point noise)
+    const setResult = await browser.setModuleInput(dpiModule.id, 'dpi', newDpi.toFixed(3));
     if (setResult.error) return { content: [{ type: 'text', text: `Error setting DPI: ${setResult.error}` }], isError: true };
 
-    // Calculate resulting dimensions for confirmation
-    const rW_mm = (25.4 * imageInfo.pixelWidth / newDpi).toFixed(1);
-    const rH_mm = (25.4 * imageInfo.pixelHeight / newDpi).toFixed(1);
-    const rW_in = (imageInfo.pixelWidth / newDpi).toFixed(3);
-    const rH_in = (imageInfo.pixelHeight / newDpi).toFixed(3);
+    // Confirmation with resulting dimensions
+    const rW_mm = (25.4 * dims.width / newDpi).toFixed(1);
+    const rH_mm = (25.4 * dims.height / newDpi).toFixed(1);
+    const rW_in = (dims.width / newDpi).toFixed(3);
+    const rH_in = (dims.height / newDpi).toFixed(3);
 
     const response = {
-      success: true, dpiSet: newDpi,
-      imagePixels: `${imageInfo.pixelWidth} x ${imageInfo.pixelHeight}`,
+      success: true, dpiSet: parseFloat(newDpi.toFixed(3)),
+      imagePixels: `${dims.width} x ${dims.height}`,
       resultingSize: { mm: `${rW_mm} x ${rH_mm} mm`, in: `${rW_in} x ${rH_in} in` }
     };
 
-    // Warn if requested height doesn't match aspect ratio
     if (height !== undefined) {
       const heightInches = unit === 'mm' ? height / 25.4 : unit === 'cm' ? height / 2.54 : height;
-      const actualHeightInches = imageInfo.pixelHeight / newDpi;
+      const actualHeightInches = dims.height / newDpi;
       if (Math.abs(actualHeightInches - heightInches) / heightInches > 0.05) {
         const actualH = actualHeightInches * (unit === 'mm' ? 25.4 : unit === 'cm' ? 2.54 : 1);
         response.warning = `Image aspect ratio doesn't match. Height will be ${actualH.toFixed(1)} ${unit} instead of ${height} ${unit}. DPI is set based on width.`;
