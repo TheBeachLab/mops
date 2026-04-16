@@ -553,12 +553,17 @@ mcpServer.tool('set_physical_size',
     if (!browser.isLaunched()) return { content: [{ type: 'text', text: 'Error: Browser not launched.' }], isError: true };
     if (!loadedProgram) return { content: [{ type: 'text', text: 'Error: No program loaded.' }], isError: true };
 
-    const imageInfo = await browser.getImageInfo();
+    // Retry — image dimensions may not be in the DOM yet right after load_file
+    let imageInfo = await browser.getImageInfo();
+    if (imageInfo.error && imageInfo.error.includes('load a file')) {
+      await new Promise(r => setTimeout(r, 2000));
+      imageInfo = await browser.getImageInfo();
+    }
     if (imageInfo.error) return { content: [{ type: 'text', text: `Error: ${imageInfo.error}` }], isError: true };
 
-    // Convert desired width to inches
+    // Convert desired width to inches, round DPI down to avoid undersizing
     const widthInches = unit === 'mm' ? width / 25.4 : unit === 'cm' ? width / 2.54 : width;
-    const newDpi = Math.round(imageInfo.pixelWidth / widthInches);
+    const newDpi = Math.floor(imageInfo.pixelWidth / widthInches) || 1;
 
     // Set DPI on the reader module
     const setResult = await browser.setModuleInput(imageInfo.moduleId, 'dpi', String(newDpi));
