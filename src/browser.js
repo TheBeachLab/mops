@@ -1,8 +1,9 @@
 // browser.js — Playwright browser lifecycle and page interaction
 
 import { chromium } from 'playwright';
-import { readFile } from 'node:fs/promises';
-import { extname } from 'node:path';
+import { readFile, mkdir } from 'node:fs/promises';
+import { extname, join } from 'node:path';
+import { homedir } from 'node:os';
 
 let browserInstance = null;
 let page = null;
@@ -14,9 +15,14 @@ let machineNames = [];
 let lastImageInfo = null;
 
 export async function launch(modsUrl, headless = false) {
-  browserInstance = await chromium.launch({ headless, channel: 'chrome' });
-  const context = await browserInstance.newContext({ acceptDownloads: true });
-  page = await context.newPage();
+  // Persistent profile so WebUSB/WebSerial device grants survive across sessions
+  const userDataDir = join(homedir(), '.mops', 'chrome-data');
+  await mkdir(userDataDir, { recursive: true });
+  const context = await chromium.launchPersistentContext(userDataDir, {
+    headless, channel: 'chrome', acceptDownloads: true
+  });
+  browserInstance = context;
+  page = context.pages()[0] || await context.newPage();
 
   // Intercept downloads
   page.on('download', async (download) => {
