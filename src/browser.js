@@ -119,6 +119,8 @@ export async function loadProgram(modsUrl, programPath, srcUrl) {
   let url = `${modsUrl}/?program=${encodedPath}`;
   if (srcUrl) url += `&src=${encodeURIComponent(srcUrl)}`;
   await page.goto(url, { waitUntil: 'load' });
+  // Re-enable CDP DeviceAccess after navigation (domains can reset on page load)
+  if (cdpSession) await cdpSession.send('DeviceAccess.enable').catch(() => {});
   await page.waitForFunction(() => typeof window.mods_prog_load === 'function', { timeout: 15000 });
   await page.waitForFunction(() => {
     const modules = document.getElementById('modules');
