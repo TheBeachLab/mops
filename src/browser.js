@@ -14,6 +14,57 @@ let discoveredDevices = [];
 let machineNames = [];
 let lastImageInfo = null;
 
+async function handleDevicePrompt(event) {
+  const { id, devices } = event;
+  console.error(`[mops] Device prompt: ${devices.map(d => d.name).join(', ')}`);
+
+  for (const d of devices) {
+    if (!discoveredDevices.some(dd => dd.name === d.name)) {
+      discoveredDevices.push({ name: d.name, discoveredAt: Date.now() });
+    }
+  }
+
+  // 1. Try exact deviceName filters first
+  let match = devices.find(d =>
+    deviceNameFilters.some(filter => d.name.toLowerCase().includes(filter.toLowerCase()))
+  );
+
+  // 2. Fuzzy match against profile machine names
+  if (!match && machineNames.length > 0) {
+    match = devices.find(d => {
+      const dLower = d.name.toLowerCase();
+      return machineNames.some(mName => {
+        const keywords = mName.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+        const matched = keywords.filter(kw => dLower.includes(kw));
+        return matched.length >= 2;
+      });
+    });
+  }
+
+  if (match) {
+    console.error(`[mops] Auto-selecting device: ${match.name}`);
+    if (!deviceNameFilters.some(f => f.toLowerCase() === match.name.toLowerCase())) {
+      deviceNameFilters.push(match.name);
+    }
+    try {
+      await cdpSession.send('DeviceAccess.selectPrompt', { id, deviceId: match.id });
+    } catch (err) {
+      console.error(`[mops] selectPrompt failed: ${err.message}`);
+    }
+  } else {
+    console.error(`[mops] No auto-match. Discovered: ${devices.map(d => d.name).join(', ')}`);
+  }
+}
+
+async function setupCdpDeviceAccess() {
+  if (cdpSession) {
+    try { await cdpSession.detach(); } catch {}
+  }
+  cdpSession = await page.context().newCDPSession(page);
+  await cdpSession.send('DeviceAccess.enable');
+  cdpSession.on('DeviceAccess.deviceRequestPrompted', handleDevicePrompt);
+}
+
 export async function launch(modsUrl, headless = false) {
   // Persistent profile so WebUSB/WebSerial device grants survive across sessions
   const userDataDir = join(homedir(), '.mops', 'chrome-data');
@@ -35,49 +86,7 @@ export async function launch(modsUrl, headless = false) {
     });
   });
 
-  // Set up CDP session for WebUSB/WebSerial device auto-selection
-  cdpSession = await page.context().newCDPSession(page);
-  await cdpSession.send('DeviceAccess.enable');
-  cdpSession.on('DeviceAccess.deviceRequestPrompted', async (event) => {
-    const { id, devices } = event;
-    console.error(`[mops] Device prompt: ${devices.map(d => d.name).join(', ')}`);
-
-    // Store discovered devices
-    for (const d of devices) {
-      if (!discoveredDevices.some(dd => dd.name === d.name)) {
-        discoveredDevices.push({ name: d.name, discoveredAt: Date.now() });
-      }
-    }
-
-    // 1. Try exact deviceName filters first
-    let match = devices.find(d =>
-      deviceNameFilters.some(filter => d.name.toLowerCase().includes(filter.toLowerCase()))
-    );
-
-    // 2. Fuzzy match against profile machine names (e.g., "Roland GX-24" matches "Roland DG GX-24")
-    if (!match && machineNames.length > 0) {
-      match = devices.find(d => {
-        const dLower = d.name.toLowerCase();
-        return machineNames.some(mName => {
-          const keywords = mName.toLowerCase().split(/\s+/).filter(w => w.length > 2);
-          const matched = keywords.filter(kw => dLower.includes(kw));
-          return matched.length >= 2; // at least 2 keywords must match
-        });
-      });
-    }
-
-    if (match) {
-      console.error(`[mops] Auto-selecting device: ${match.name}`);
-      // Remember exact device name for instant matching on future prompts
-      if (!deviceNameFilters.some(f => f.toLowerCase() === match.name.toLowerCase())) {
-        deviceNameFilters.push(match.name);
-      }
-      await cdpSession.send('DeviceAccess.selectPrompt', { id, deviceId: match.id });
-    } else {
-      // No match — leave the picker open for the user to select manually
-      console.error(`[mops] No auto-match found. Leaving device picker open for manual selection. Discovered: ${devices.map(d => d.name).join(', ')}`);
-    }
-  });
+  await setupCdpDeviceAccess();
 
   await page.goto(modsUrl, { waitUntil: 'load' });
   await page.waitForFunction(() => typeof window.mods_prog_load === 'function', { timeout: 15000 });
@@ -125,8 +134,8 @@ export async function loadProgram(modsUrl, programPath, srcUrl) {
   let url = `${modsUrl}/?program=${encodedPath}`;
   if (srcUrl) url += `&src=${encodeURIComponent(srcUrl)}`;
   await page.goto(url, { waitUntil: 'load' });
-  // Re-enable CDP DeviceAccess after navigation (domains can reset on page load)
-  if (cdpSession) await cdpSession.send('DeviceAccess.enable').catch(() => {});
+  // Recreate CDP session after navigation (session state is unreliable after page.goto)
+  await setupCdpDeviceAccess();
   await page.waitForFunction(() => typeof window.mods_prog_load === 'function', { timeout: 15000 });
   await page.waitForFunction(() => {
     const modules = document.getElementById('modules');
