@@ -579,10 +579,16 @@ mcpServer.tool('set_physical_size',
     const dims = await readImageDimensions(lastLoadedFile);
     if (!dims) return { content: [{ type: 'text', text: `Error: Cannot read dimensions from ${lastLoadedFile}` }], isError: true };
 
-    // Find the module with a DPI parameter
-    const state = await browser.getProgramState();
-    const dpiModule = state.find(m => m.params.some(p => p.label.toLowerCase().includes('dpi')));
-    if (!dpiModule) return { content: [{ type: 'text', text: 'Error: No module with a DPI parameter found in the loaded program.' }], isError: true };
+    // Find the reader module — try name first, fall back to any module with DPI
+    const readerNames = ['read', 'png', 'svg', 'image'];
+    let found = null;
+    for (const name of readerNames) {
+      found = await findModule(name);
+      if (!found.error && found.module.params.some(p => p.label.toLowerCase().includes('dpi'))) break;
+      found = null;
+    }
+    const dpiModule = found ? found.module : null;
+    if (!dpiModule) return { content: [{ type: 'text', text: 'Error: No reader module with a DPI parameter found in the loaded program.' }], isError: true };
 
     // Calculate exact DPI from desired width
     const widthInches = unit === 'mm' ? width / 25.4 : unit === 'cm' ? width / 2.54 : width;
