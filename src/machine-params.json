@@ -1,0 +1,10 @@
+{
+  "_comment": "Maps generic parameter names (speed, depth, etc.) to machine-specific module+parameter pairs so setup_cut can accept {parameters: {speed: 20}} without the caller knowing the machine's internal module structure. Match is case-insensitive on machine name. Unknown parameter keys fall back to a substring search across all modules.",
+  "machines": {
+    "Roland GX-24": {
+      "params": {
+        "speed": { "module": "Roland GX/GS-24 Relative", "parameter": "speed (cm/s)" }
+      }
+    }
+  }
+}

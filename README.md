@@ -112,7 +112,7 @@ Optional flags via args:
 | `list_programs` | List available programs by category |
 | `list_modules` | List available modules by category |
 | `get_module_info` | Parse a module's inputs, outputs, and types |
-| `load_program` | Load a program into the browser, optionally preload a file via src URL |
+| `load_program` | Load a program into the browser and return a full snapshot (modules, parameters with labels + values, buttons, and the link graph). Optionally preload a file via src URL |
 | `get_program_state` | Read all modules, parameters, connections, and switch states |
 | `set_parameter` | Set a parameter value in a module |
 | `set_parameters` | Set multiple parameters across modules in a single call |
@@ -122,6 +122,9 @@ Optional flags via args:
 | `create_program` | Build a custom program from modules and connections |
 | `save_program` | Extract the current program state as v2 JSON |
 | `export_file` | Retrieve the most recently generated output file |
+| `get_job_status` | Composite read-only snapshot: machine, program, file, size, device, toolpath readiness, next step |
+| `send_job` | Composite send-to-machine: toggle output gate, fetch device, calculate, verify, send |
+| `setup_cut` | Composite setup: find machine → load program → load file → set physical size → set parameters |
 
 ## User Profile
 

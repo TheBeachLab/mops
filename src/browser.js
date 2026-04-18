@@ -1,7 +1,7 @@
 // browser.js — Playwright browser lifecycle and page interaction
 
 import { chromium } from 'playwright';
-import { readFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { extname, join } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -13,6 +13,26 @@ let deviceNameFilters = [];
 let discoveredDevices = [];
 let machineNames = [];
 let lastImageInfo = null;
+
+// Read pixel/vector dimensions directly from the file.
+// mods's moduleOutput event doesn't carry width/height, so this is the
+// authoritative source for lastImageInfo after a file load.
+async function readFileDimensions(filePath) {
+  const ext = extname(filePath).toLowerCase();
+  if (ext !== '.png' && ext !== '.svg') return null;
+  const buf = await readFile(filePath);
+  if (ext === '.png') {
+    // PNG IHDR: width at byte 16, height at byte 20 (big-endian uint32)
+    return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
+  }
+  const svg = buf.toString('utf-8');
+  const vb = svg.match(/viewBox=["'][\d.]+\s+[\d.]+\s+([\d.]+)\s+([\d.]+)["']/);
+  if (vb) return { width: parseFloat(vb[1]), height: parseFloat(vb[2]) };
+  const w = svg.match(/width=["']([\d.]+)/);
+  const h = svg.match(/height=["']([\d.]+)/);
+  if (w && h) return { width: parseFloat(w[1]), height: parseFloat(h[1]) };
+  return null;
+}
 
 async function handleDevicePrompt(event) {
   const { id, devices } = event;
@@ -65,12 +85,30 @@ async function setupCdpDeviceAccess() {
   cdpSession.on('DeviceAccess.deviceRequestPrompted', handleDevicePrompt);
 }
 
+// Repair Chrome's crash markers if a prior session died hard (SIGKILL, etc).
+// The restore-session bubble reads these fields at startup; clearing them is
+// the real fix — the --disable-session-crashed-bubble flag is just belt.
+async function markProfileCleanExit(userDataDir) {
+  const prefsPath = join(userDataDir, 'Default', 'Preferences');
+  try {
+    const raw = await readFile(prefsPath, 'utf-8');
+    const prefs = JSON.parse(raw);
+    const profile = prefs.profile || (prefs.profile = {});
+    if (profile.exit_type === 'Normal' && profile.exited_cleanly === true) return;
+    profile.exit_type = 'Normal';
+    profile.exited_cleanly = true;
+    await writeFile(prefsPath, JSON.stringify(prefs));
+  } catch { /* missing/malformed — fresh profile or we'll let Chrome recreate */ }
+}
+
 export async function launch(modsUrl, headless = false) {
   // Persistent profile so WebUSB/WebSerial device grants survive across sessions
   const userDataDir = join(homedir(), '.mops', 'chrome-data');
   await mkdir(userDataDir, { recursive: true });
+  await markProfileCleanExit(userDataDir);
   const context = await chromium.launchPersistentContext(userDataDir, {
-    headless, channel: 'chrome', acceptDownloads: true
+    headless, channel: 'chrome', acceptDownloads: true,
+    args: ['--disable-session-crashed-bubble']
   });
   browserInstance = context;
   page = context.pages()[0] || await context.newPage();
@@ -182,12 +220,19 @@ export async function postMessageFile(filePath) {
   if (outputEvent && outputEvent !== 'ready') {
     result.module = outputEvent.module;
     result.output = outputEvent.output;
-    if (outputEvent.data) {
-      result.moduleData = outputEvent.data;
-      if (outputEvent.data.width && outputEvent.data.height) {
-        lastImageInfo = { ...outputEvent.data, moduleId: outputEvent.module.id, moduleName: outputEvent.module.name };
-      }
-    }
+    if (outputEvent.data) result.moduleData = outputEvent.data;
+  }
+  const fileDims = await readFileDimensions(filePath);
+  if (fileDims) {
+    const mod = (outputEvent && outputEvent !== 'ready') ? outputEvent.module : null;
+    const eventData = (outputEvent && outputEvent !== 'ready' && outputEvent.data) ? outputEvent.data : {};
+    lastImageInfo = {
+      ...eventData,
+      width: fileDims.width,
+      height: fileDims.height,
+      moduleId: mod?.id ?? null,
+      moduleName: mod?.name ?? null,
+    };
   }
   return result;
 }
@@ -221,12 +266,19 @@ export async function setModuleFile(moduleId, filePath) {
   if (outputEvent && outputEvent !== 'ready') {
     result.module = outputEvent.module;
     result.output = outputEvent.output;
-    if (outputEvent.data) {
-      result.moduleData = outputEvent.data;
-      if (outputEvent.data.width && outputEvent.data.height) {
-        lastImageInfo = { ...outputEvent.data, moduleId: outputEvent.module.id, moduleName: outputEvent.module.name };
-      }
-    }
+    if (outputEvent.data) result.moduleData = outputEvent.data;
+  }
+  const fileDims = await readFileDimensions(filePath);
+  if (fileDims) {
+    const mod = (outputEvent && outputEvent !== 'ready') ? outputEvent.module : null;
+    const eventData = (outputEvent && outputEvent !== 'ready' && outputEvent.data) ? outputEvent.data : {};
+    lastImageInfo = {
+      ...eventData,
+      width: fileDims.width,
+      height: fileDims.height,
+      moduleId: mod?.id ?? null,
+      moduleName: mod?.name ?? null,
+    };
   }
   return result;
 }
@@ -297,6 +349,32 @@ export async function getProgramState() {
       result.push(entry);
     }
     return result;
+  });
+}
+
+export async function getProgramLinks() {
+  if (!page) throw new Error('Browser not launched');
+  return page.evaluate(() => {
+    const out = [];
+    const svg = document.getElementById('svg');
+    if (!svg) return out;
+    const linksGroup = svg.getElementById('links');
+    if (!linksGroup) return out;
+    for (let l = 0; l < linksGroup.childNodes.length; l++) {
+      const link = linksGroup.childNodes[l];
+      if (!link.id) continue;
+      try {
+        const linkData = JSON.parse(link.id);
+        const source = JSON.parse(linkData.source);
+        const dest = JSON.parse(linkData.dest);
+        const srcMod = document.getElementById(source.id);
+        const destMod = document.getElementById(dest.id);
+        const srcName = srcMod ? srcMod.dataset.name : source.id;
+        const destName = destMod ? destMod.dataset.name : dest.id;
+        out.push({ from: `${srcName}.${source.name}`, to: `${destName}.${dest.name}` });
+      } catch { /* skip malformed link */ }
+    }
+    return out;
   });
 }
 

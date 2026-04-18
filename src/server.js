@@ -3,6 +3,7 @@
 import { stat, readFile, writeFile, mkdir } from 'node:fs/promises';
 import { extname, join } from 'node:path';
 import { homedir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
@@ -170,6 +171,36 @@ let lastLoadedFile = null;
 // --- MCP Server ---
 const mcpServer = new McpServer({ name: 'mops', version: '0.2.0' });
 
+// Wrap tool registration so every tool call is logged with args, duration,
+// and result/error. Output goes to stderr (MCP convention) and is captured
+// by mops-voice into its session log file.
+const _origTool = mcpServer.tool.bind(mcpServer);
+mcpServer.tool = function (name, description, schema, handler) {
+  const wrapped = async (args) => {
+    const ts = new Date().toISOString().slice(11, 23);
+    const argStr = (() => {
+      try { return JSON.stringify(args ?? {}).slice(0, 300); }
+      catch { return '<unserializable>'; }
+    })();
+    console.error(`[mops][tool] ${ts} → ${name} ${argStr}`);
+    const t0 = Date.now();
+    try {
+      const result = await handler(args);
+      const ms = Date.now() - t0;
+      const text = result?.content?.[0]?.text ?? '';
+      const preview = String(text).slice(0, 240).replace(/\s+/g, ' ');
+      const tag = result?.isError ? 'ERR' : 'OK';
+      console.error(`[mops][tool] ← ${name} [${tag}] ${ms}ms: ${preview}`);
+      return result;
+    } catch (err) {
+      const ms = Date.now() - t0;
+      console.error(`[mops][tool] ✖ ${name} ${ms}ms: ${err.stack || err.message}`);
+      throw err;
+    }
+  };
+  return _origTool(name, description, schema, wrapped);
+};
+
 async function findModule(moduleName, moduleId) {
   const state = await browser.getProgramState();
   if (moduleId) {
@@ -182,6 +213,19 @@ async function findModule(moduleName, moduleId) {
     return { error: `Module "${moduleName}" not found. Available: ${available.join(', ')}` };
   }
   return { module: mod };
+}
+
+async function buildProgramSnapshot() {
+  const [state, links] = await Promise.all([browser.getProgramState(), browser.getProgramLinks()]);
+  return {
+    modules: state.map(m => ({
+      id: m.id,
+      name: m.name,
+      params: m.params.map(p => ({ label: p.label, value: p.value })),
+      buttons: m.buttons,
+    })),
+    links,
+  };
 }
 
 function parseModuleNameId(module_name) {
@@ -470,8 +514,10 @@ mcpServer.tool('load_program',
     if (!browser.isLaunched()) return { content: [{ type: 'text', text: 'Error: Browser not launched. Use launch_browser first.' }], isError: true };
     await browser.loadProgram(modsUrl, path, src);
     loadedProgram = path;
-    const state = await browser.getProgramState();
-    const result = { loaded: path, modules: state.map(m => ({ id: m.id, name: m.name, paramCount: m.params.length, buttons: m.buttons })) };
+    // Navigating to a new program invalidates any prior file state
+    lastLoadedFile = src || null;
+    const snapshot = await buildProgramSnapshot();
+    const result = { loaded: path, ...snapshot };
     if (src) result.src = src;
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }
@@ -738,6 +784,394 @@ mcpServer.tool('save_program', 'Extract the current program state as v2 JSON', {
   }
 );
 
+// --- Composite tools: shared helpers ---
+
+const MACHINE_PARAMS_PATH = fileURLToPath(new URL('./machine-params.json', import.meta.url));
+
+async function loadMachineParams() {
+  try {
+    const raw = await readFile(MACHINE_PARAMS_PATH, 'utf-8');
+    return JSON.parse(raw);
+  } catch {
+    return { machines: {} };
+  }
+}
+
+function upstreamOf(state, moduleId) {
+  const mod = state.find(m => m.id === moduleId);
+  if (!mod?.connectedFrom) return [];
+  return mod.connectedFrom
+    .map(link => state.find(m => m.id === link.fromId))
+    .filter(Boolean);
+}
+
+// The module that talks to the machine. Identified by a button label that
+// only ever appears on WebUSB/WebSerial output modules ("get device", "send file",
+// "waiting for file"). Name-based matching is unreliable across program variants.
+function findOutputSendModule(state) {
+  const sendLabels = /send file|get device|waiting for file|ready to send/i;
+  return state.find(m => m.buttons?.some(b => sendLabels.test(b))) || null;
+}
+
+function findCalculateModule(state) {
+  return state.find(m => m.buttons?.some(b => /^\s*calculate\s*$/i.test(b))) || null;
+}
+
+// Per Fran: an on/off gate, when present, sits immediately upstream of the
+// module it gates. Look one hop only — no recursive walk.
+function findOnOffGate(state, targetModuleId) {
+  return upstreamOf(state, targetModuleId).find(m => /on\/off/i.test(m.name)) || null;
+}
+
+function findReaderModule(state) {
+  const readerNames = ['read', 'png', 'svg', 'image'];
+  for (const kw of readerNames) {
+    const m = state.find(
+      mod => mod.name.toLowerCase().includes(kw)
+        && mod.params.some(p => p.label.toLowerCase().includes('dpi'))
+    );
+    if (m) return m;
+  }
+  return state.find(m => m.params.some(p => p.label.toLowerCase().includes('dpi'))) || null;
+}
+
+function matchProfileMachine(profile, hint) {
+  if (!hint || !profile.machines?.length) return null;
+  const hintLower = hint.toLowerCase();
+  // Exact/substring match on name
+  let m = profile.machines.find(
+    x => x.name.toLowerCase() === hintLower || x.name.toLowerCase().includes(hintLower)
+  );
+  if (m) return m;
+  // Match on type (e.g., "vinyl cutter")
+  m = profile.machines.find(x => (x.type || '').toLowerCase().includes(hintLower));
+  if (m) return m;
+  // Keyword match against name+type+notes
+  m = profile.machines.find(x => {
+    const bag = `${x.name} ${x.type || ''} ${x.notes || ''}`.toLowerCase();
+    return hintLower.split(/\s+/).some(w => w.length > 2 && bag.includes(w));
+  });
+  return m || null;
+}
+
+function composeError(at_step, reason, extra = {}) {
+  return {
+    content: [{ type: 'text', text: JSON.stringify({ status: 'failed', at_step, reason, ...extra }, null, 2) }],
+    isError: true
+  };
+}
+
+function composeOk(payload) {
+  return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
+}
+
+// Shared DPI-from-physical-size logic used by both set_physical_size and setup_cut.
+async function applyPhysicalSize(state, filePath, size) {
+  const ext = extname(filePath).toLowerCase();
+  if (ext !== '.png') {
+    return { error: 'set_physical_size only works with PNG files' };
+  }
+  const buf = await readFile(filePath);
+  const dims = { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
+  const reader = findReaderModule(state);
+  if (!reader) return { error: 'No reader module with a DPI parameter found' };
+  const { width, height, unit } = size;
+  const widthInches = unit === 'mm' ? width / 25.4 : unit === 'cm' ? width / 2.54 : width;
+  const newDpi = dims.width / widthInches;
+  const r = await browser.setModuleInput(reader.id, 'dpi', newDpi.toFixed(3));
+  if (r.error) return { error: r.error };
+  const result = {
+    dpi: parseFloat(newDpi.toFixed(3)),
+    pixels: `${dims.width} x ${dims.height}`,
+    mm: `${(25.4 * dims.width / newDpi).toFixed(1)} x ${(25.4 * dims.height / newDpi).toFixed(1)}`
+  };
+  if (height !== undefined) {
+    const heightInches = unit === 'mm' ? height / 25.4 : unit === 'cm' ? height / 2.54 : height;
+    const actualHeightInches = dims.height / newDpi;
+    if (Math.abs(actualHeightInches - heightInches) / heightInches > 0.05) {
+      const actualH = actualHeightInches * (unit === 'mm' ? 25.4 : unit === 'cm' ? 2.54 : 1);
+      result.warning = `Aspect mismatch: height will be ${actualH.toFixed(1)} ${unit}, not ${height} ${unit}`;
+    }
+  }
+  return result;
+}
+
+// --- get_job_status ---
+
+mcpServer.tool('get_job_status',
+  'Read-only snapshot of current session: machine, program, file, size, device, toolpath readiness, next step. Call at the start of a turn to skip re-probing state.',
+  {},
+  async () => {
+    const snapshot = {
+      browser_connected: browser.isLaunched(),
+      program_loaded: loadedProgram || null,
+      file_loaded: lastLoadedFile || null,
+      device_connected: false,
+      device_name: null,
+      toolpath_calculated: false,
+      ready_to_send: false,
+      next_step: null
+    };
+
+    if (!browser.isLaunched()) {
+      snapshot.next_step = 'launch_browser';
+      return composeOk(snapshot);
+    }
+
+    const granted = await browser.getGrantedDevices();
+    if (granted.length > 0) {
+      snapshot.device_connected = true;
+      snapshot.device_name = granted[0].name;
+    }
+
+    if (!loadedProgram) {
+      snapshot.next_step = 'load_program';
+      return composeOk(snapshot);
+    }
+
+    const state = await browser.getProgramState();
+
+    // Machine: fuzzy-match profile against program path
+    const profile = await loadProfile();
+    const pathLower = loadedProgram.toLowerCase();
+    const machine = profile.machines?.find(m =>
+      m.name.toLowerCase().split(/\s+/).filter(w => w.length > 2)
+        .some(kw => pathLower.includes(kw))
+    );
+    if (machine) snapshot.machine = machine.name;
+
+    // Non-default-looking params, flat — label collisions tolerated (rare in practice)
+    const params = {};
+    for (const mod of state) {
+      for (const p of mod.params) {
+        if (p.value === '' || p.value === null || p.value === 'false') continue;
+        params[p.label] = p.value;
+      }
+    }
+    snapshot.parameters = params;
+
+    // Output + toolpath
+    const outputMod = findOutputSendModule(state);
+    if (outputMod) {
+      const sendLabels = /send file|get device|waiting for file|ready to send/i;
+      const label = outputMod.buttons.find(b => sendLabels.test(b)) || outputMod.buttons[0] || null;
+      snapshot.webusb_button_label = label;
+      snapshot.toolpath_calculated = label ? /send file/i.test(label) : false;
+      const gate = findOnOffGate(state, outputMod.id);
+      if (gate) {
+        const cb = gate.params.find(p => p.type === 'checkbox');
+        snapshot.output_gate = { on: cb ? cb.value === 'true' : null };
+      }
+      snapshot.ready_to_send = snapshot.toolpath_calculated
+        && snapshot.device_connected
+        && (!snapshot.output_gate || snapshot.output_gate.on === true);
+    }
+
+    // Size (PNG only — vector formats carry their own)
+    if (lastLoadedFile && extname(lastLoadedFile).toLowerCase() === '.png') {
+      const info = await browser.getImageInfo();
+      if (!info.error) {
+        const reader = findReaderModule(state);
+        const dpiParam = reader?.params.find(p => p.label.toLowerCase().includes('dpi'));
+        const dpi = dpiParam ? parseFloat(dpiParam.value) : null;
+        snapshot.size = {
+          pixels: `${info.pixelWidth} x ${info.pixelHeight}`,
+          ...(dpi ? {
+            mm: `${(25.4 * info.pixelWidth / dpi).toFixed(1)} x ${(25.4 * info.pixelHeight / dpi).toFixed(1)}`,
+            dpi
+          } : {})
+        };
+      }
+    }
+
+    // Next step
+    if (!snapshot.file_loaded) snapshot.next_step = 'load_file';
+    else if (snapshot.size && !snapshot.size.mm) snapshot.next_step = 'set_physical_size';
+    else if (!snapshot.device_connected) snapshot.next_step = 'get_device';
+    else if (!snapshot.toolpath_calculated) snapshot.next_step = 'calculate';
+    else if (snapshot.output_gate && snapshot.output_gate.on !== true) snapshot.next_step = 'toggle_output_gate';
+    else if (snapshot.ready_to_send) snapshot.next_step = 'send_file';
+    else snapshot.next_step = 'unknown';
+
+    return composeOk(snapshot);
+  }
+);
+
+// --- send_job ---
+
+mcpServer.tool('send_job',
+  'Composite send-to-machine: toggles on/off gate if present, connects device, calculates toolpath, verifies ready state, and clicks send. Returns {status, device, ...} or {status: "failed", at_step, reason}.',
+  {
+    skip_calculate: z.boolean().optional().default(false).describe('Skip the calculate step (toolpath already calculated)')
+  },
+  async ({ skip_calculate }) => {
+    if (!browser.isLaunched()) return composeError('precondition', 'Browser not launched');
+    if (!loadedProgram) return composeError('precondition', 'No program loaded');
+
+    let state = await browser.getProgramState();
+    const outputMod = findOutputSendModule(state);
+    if (!outputMod) return composeError('find_output', 'No WebUSB/WebSerial output module found in loaded program');
+
+    // Step 1: on/off gate (if present)
+    const gate = findOnOffGate(state, outputMod.id);
+    if (gate) {
+      const gateCheckbox = gate.params.find(p => p.type === 'checkbox');
+      if (gateCheckbox && gateCheckbox.value !== 'true') {
+        const r = await browser.setModuleInput(gate.id, gateCheckbox.label, 'true');
+        if (r.error) return composeError('toggle_gate', r.error, { gate_id: gate.id });
+      }
+    }
+
+    // Step 2: connect device if not already granted
+    let granted = await browser.getGrantedDevices();
+    if (granted.length === 0) {
+      const r = await browser.clickModuleButton(outputMod.id, 'get device');
+      if (r.error) return composeError('get_device_click', r.error);
+      // CDP auto-selects granted devices; give the picker a beat to resolve.
+      await new Promise(res => setTimeout(res, 1500));
+      granted = await browser.getGrantedDevices();
+    }
+    if (granted.length === 0) {
+      return composeError('verify_device', 'No devices found after Get Device. Plug the machine in and grant access via the browser picker.');
+    }
+    const device = granted[0].name;
+
+    // Step 3: calculate toolpath
+    if (!skip_calculate) {
+      const calcMod = findCalculateModule(state);
+      if (!calcMod) return composeError('find_calculator', 'No module with a "calculate" button found');
+      browser.clearDownloads();
+      const r = await browser.clickModuleButton(calcMod.id, 'calculate');
+      if (r.error) return composeError('calculate_click', r.error);
+      await browser.waitForProcessingSignal({ timeout: 30000 });
+    }
+
+    // Step 4: verify button flipped to "send file"
+    state = await browser.getProgramState();
+    const outputAfterCalc = state.find(m => m.id === outputMod.id);
+    const sendLabel = outputAfterCalc?.buttons.find(b => /send file/i.test(b));
+    if (!sendLabel) {
+      const current = outputAfterCalc?.buttons[0] || 'unknown';
+      return composeError('verify_send_ready', `Expected "send file" button, got "${current}". Toolpath may not have reached the output module.`, { current_label: current });
+    }
+
+    // Step 5: click send
+    const clickResult = await browser.clickModuleButton(outputMod.id, 'send file');
+    if (clickResult.error) return composeError('send_click', clickResult.error);
+
+    // Step 6: verify — if label reverts to "waiting for file", the click didn't register data
+    await new Promise(res => setTimeout(res, 800));
+    state = await browser.getProgramState();
+    const outputAfterSend = state.find(m => m.id === outputMod.id);
+    const afterLabel = outputAfterSend?.buttons[0] || '';
+    const bounced = /waiting for file/i.test(afterLabel);
+
+    return composeOk({
+      status: 'sent',
+      device,
+      button_label_after: afterLabel,
+      ...(bounced ? { warning: 'Button reverted to "waiting for file" — send may have failed silently. Re-run send_job or verify the machine received data.' } : {})
+    });
+  }
+);
+
+// --- setup_cut ---
+
+mcpServer.tool('setup_cut',
+  'Composite setup: find machine, load program, load file, set physical size, set parameters. Parameter names can be generic (e.g. "speed") — mops maps them to the right module via machine-params.json, falling back to substring search.',
+  {
+    machine_hint: z.string().describe('Machine name, model, or type (e.g., "Roland GX-24", "vinyl cutter")'),
+    file_path: z.string().describe('Absolute path to the file to load (PNG or SVG)'),
+    size: z.object({
+      width: z.number(),
+      height: z.number().optional(),
+      unit: z.enum(['mm', 'cm', 'in']).default('mm')
+    }).optional().describe('Physical size (PNG only)'),
+    parameters: z.record(z.string(), z.union([z.string(), z.number()])).optional().describe('Generic parameter map (e.g., {"speed": 20}). Falls back to label substring search.')
+  },
+  async ({ machine_hint, file_path, size, parameters }) => {
+    if (!browser.isLaunched()) return composeError('precondition', 'Browser not launched');
+
+    try { await stat(file_path); }
+    catch { return composeError('load_file', `File not found: ${file_path}`); }
+
+    const ext = extname(file_path).toLowerCase();
+    if (ext !== '.png' && ext !== '.svg') {
+      return composeError('load_file', `setup_cut supports PNG/SVG. For ${ext}, use load_file manually.`);
+    }
+
+    // Step 1: match machine
+    const profile = await loadProfile();
+    if (!profile.machines?.length) return composeError('find_machine', 'No machines in profile. Use update_profile first.');
+    const machine = matchProfileMachine(profile, machine_hint);
+    if (!machine) return composeError('find_machine', `No machine matching "${machine_hint}" in profile`);
+
+    // Step 2: resolve program path
+    let programPath = machine.program;
+    if (!programPath) {
+      const programs = await getProgramsManifest();
+      const keywords = machine.name.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+      const match = programs.find(p => {
+        const bag = `${p.path} ${p.name || ''}`.toLowerCase();
+        return keywords.some(kw => bag.includes(kw));
+      });
+      if (!match) return composeError('find_program', `No program found for machine "${machine.name}"`);
+      programPath = match.path;
+    }
+
+    // Step 3: load program
+    try {
+      await browser.loadProgram(modsUrl, programPath);
+      loadedProgram = programPath;
+      lastLoadedFile = null;
+    } catch (err) {
+      return composeError('load_program', err.message, { program: programPath });
+    }
+
+    // Step 4: load file (PNG/SVG via postMessage)
+    const loadRes = await browser.postMessageFile(file_path);
+    if (loadRes.error) return composeError('load_file', loadRes.error);
+    lastLoadedFile = file_path;
+
+    const result = { status: 'ready', machine: machine.name, program: programPath, file: file_path };
+
+    // Step 5: physical size (PNG only)
+    let state = await browser.getProgramState();
+    if (size && ext === '.png') {
+      const sizeRes = await applyPhysicalSize(state, file_path, size);
+      if (sizeRes.error) return composeError('set_size', sizeRes.error);
+      result.size = sizeRes;
+      state = await browser.getProgramState();
+    }
+
+    // Step 6: parameters (generic names → machine-specific via map, else substring)
+    if (parameters && Object.keys(parameters).length > 0) {
+      const paramMap = (await loadMachineParams()).machines?.[machine.name]?.params || {};
+      const paramResults = {};
+      for (const [key, value] of Object.entries(parameters)) {
+        const mapping = paramMap[key.toLowerCase()] || paramMap[key];
+        let targetMod = null, paramLabel = null;
+        if (mapping) {
+          targetMod = state.find(m => m.name.toLowerCase().includes(mapping.module.toLowerCase()));
+          paramLabel = mapping.parameter;
+        }
+        if (!targetMod) {
+          // Fallback: any module with a param label containing the key
+          targetMod = state.find(m => m.params.some(p => p.label.toLowerCase().includes(key.toLowerCase())));
+          paramLabel = key;
+        }
+        if (!targetMod) { paramResults[key] = { error: `No module with parameter matching "${key}"` }; continue; }
+        const r = await browser.setModuleInput(targetMod.id, paramLabel, String(value));
+        paramResults[key] = { module: targetMod.name, parameter: paramLabel, ...r };
+      }
+      result.parameters_set = paramResults;
+    }
+
+    const snapshot = await buildProgramSnapshot();
+    return composeOk({ ...result, ...snapshot });
+  }
+);
+
 // --- Startup ---
 async function start() {
   try {
@@ -755,14 +1189,21 @@ async function start() {
   console.error('[mops] MCP server running on stdio');
 }
 
+let cleaningUp = false;
 async function cleanup() {
+  if (cleaningUp) return;
+  cleaningUp = true;
   console.error('[mops] Shutting down...');
-  await browser.close();
+  try { await browser.close(); } catch (err) { console.error(`[mops] browser.close error: ${err.message}`); }
   process.exit(0);
 }
 
 process.on('SIGINT', cleanup);
 process.on('SIGTERM', cleanup);
+// Claude Desktop often closes stdin without signaling — treat EOF as shutdown
+// so Chrome exits cleanly and doesn't leave the profile flagged as crashed.
+process.stdin.on('end', cleanup);
+process.stdin.on('close', cleanup);
 
 start().catch(err => {
   console.error(`[mops] Fatal error: ${err.message}`);

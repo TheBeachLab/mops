@@ -83,6 +83,9 @@ The MCP server connects to a remote mods CE deployment (default: `https://modspr
 | `create_program` | Build a new v2 program from module paths and connections |
 | `save_program` | Extract current program state as v2 JSON |
 | `export_file` | Get the most recently downloaded/exported file |
+| `get_job_status` | Read-only composite snapshot: machine, program, file, size, device, toolpath readiness, next step |
+| `send_job` | Composite send-to-machine: gate toggle (if present) → get device → calculate → verify → send |
+| `setup_cut` | Composite setup: find_machine → load_program → load_file → set_physical_size → set_parameters |
 
 ## Development Setup
 
@@ -170,3 +173,6 @@ Example with all flags:
 - **Device auto-selection**: CDP `DeviceAccess` intercepts WebUSB/WebSerial pickers and auto-selects based on profile. The CDP session must be **recreated** (detach + new session) after each `page.goto()` — just re-enabling the domain is not reliable. The handler is extracted as `handleDevicePrompt` and re-registered via `setupCdpDeviceAccess()`.
 - **Persistent browser profile**: `~/.mops/chrome-data/` stores device grants across sessions via `launchPersistentContext`. Mods uses `getDevices()`/`getPorts()` to auto-reconnect to previously paired devices without a picker.
 - **Device name matching**: Don't split on dashes — model numbers like "GX-24" and "SRM-20" must stay as single tokens. Split on spaces only (`/\s+/`), filter by `length > 2`.
+- **Composite tools (`get_job_status` / `send_job` / `setup_cut`)**: additive orchestrators built on top of the primitives. `send_job` finds the output module by button-label match (`send file`/`get device`/`waiting for file`), detects an on/off gate as the *immediate* upstream neighbor only (not multi-hop), and treats a post-send label reverting to "waiting for file" as a soft warning rather than a hard failure. Keep every low-level tool intact — the composites are for the 80% path; primitives remain the escape hatch.
+- **Generic param mapping**: `src/machine-params.json` maps generic names (`speed`, etc.) to `{module, parameter}` pairs per machine. `setup_cut` falls back to a label substring search when a key isn't in the map. Extend the JSON as new machines are used in practice.
+- **`lastImageInfo` authoritative source**: mods's `moduleOutput` event doesn't include `width`/`height`, so `postMessageFile`/`setModuleFile` populate `lastImageInfo` from the file header (PNG IHDR or SVG `viewBox`/`width`/`height`). Event data is merged in for ancillary fields (DPI, etc.), but file-derived dimensions always win.
