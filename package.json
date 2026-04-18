@@ -1,15 +1,49 @@
 {
-  "name": "mops",
-  "version": "0.2.0",
+  "name": "@beachlab/mops",
+  "version": "0.3.0",
   "description": "MOPS — Machines Obeying Prompt Suggestions. MCP server bridging LLMs to the Mods CE digital fabrication platform.",
   "type": "module",
   "main": "src/server.js",
+  "bin": {
+    "mops": "src/server.js"
+  },
+  "files": [
+    "src/",
+    "README.md",
+    "CLAUDE.md",
+    "LICENSE"
+  ],
   "engines": {
     "node": ">=18.0.0"
   },
   "scripts": {
     "start": "node src/server.js",
-    "setup": "npx playwright install"
+    "setup": "node src/server.js setup"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "mods",
+    "digital-fabrication",
+    "cnc",
+    "vinyl-cutter",
+    "3d-printing",
+    "laser-cutter",
+    "playwright",
+    "llm-tools"
+  ],
+  "author": "Beachlab",
+  "license": "MIT",
+  "homepage": "https://github.com/TheBeachLab/mops#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TheBeachLab/mops.git"
+  },
+  "bugs": {
+    "url": "https://github.com/TheBeachLab/mops/issues"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",

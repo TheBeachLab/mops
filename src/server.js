@@ -1,9 +1,11 @@
+#!/usr/bin/env node
 // server.js — MCP server for remote mods CE interaction
 
 import { stat, readFile, writeFile, mkdir } from 'node:fs/promises';
 import { extname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
@@ -12,6 +14,26 @@ import * as browser from './browser.js';
 
 // --- CLI ---
 const args = process.argv.slice(2);
+
+// Subcommands run before normal flag parsing so they can short-circuit.
+if (args[0] === 'setup') {
+  const r = spawnSync('npx', ['playwright', 'install', 'chromium'], { stdio: 'inherit' });
+  process.exit(r.status ?? 1);
+}
+if (args[0] === '--help' || args[0] === '-h') {
+  process.stdout.write([
+    'Usage:',
+    '  mops              Start the MCP server on stdio (default)',
+    '  mops setup        Install the Playwright Chromium browser (run once)',
+    '',
+    'Flags:',
+    '  --mods-url URL    Mods CE deployment to control (default: https://modsproject.org)',
+    '  --headless        Run the browser without a visible window',
+    '',
+  ].join('\n'));
+  process.exit(0);
+}
+
 let modsUrl = 'https://modsproject.org';
 let headless = false;
 for (let i = 0; i < args.length; i++) {
