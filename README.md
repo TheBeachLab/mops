@@ -40,19 +40,20 @@ Mods CE includes pre-built programs for:
 - Node.js >= 18.0.0
 - Internet connection (or a local Mods CE dev server)
 
-### Installation
+### Install
+
+One-time setup to fetch the Playwright Chromium browser:
 
 ```bash
-git clone https://github.com/TheBeachLab/mops.git
-cd mops
-npm install
-npx playwright install chrome
+npx -y @thebeachlab/mops setup
 ```
 
-### Running the server
+That's it — no clone required.
+
+### Run the server
 
 ```bash
-node src/server.js
+npx -y @thebeachlab/mops
 ```
 
 This starts:
@@ -62,8 +63,24 @@ This starts:
 Options:
 - `--mods-url <url>` — connect to a different Mods CE deployment (default: `https://modsproject.org`)
 - `--headless` — run Chrome in headless mode
+- `--help` — show usage
 
 ## Configuration
+
+### Claude Desktop
+
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or the equivalent on Windows/Linux:
+
+```json
+{
+  "mcpServers": {
+    "mops": {
+      "command": "npx",
+      "args": ["-y", "@thebeachlab/mops"]
+    }
+  }
+}
+```
 
 ### Claude Code
 
@@ -72,32 +89,35 @@ Add to your project's `.mcp.json`:
 ```json
 {
   "mcpServers": {
-    "mods": {
-      "command": "node",
-      "args": ["/absolute/path/to/mods-mcp/src/server.js"]
+    "mops": {
+      "command": "npx",
+      "args": ["-y", "@thebeachlab/mops"]
     }
   }
 }
 ```
 
-### Claude Desktop
+### Cursor / other MCP clients
 
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
+Same pattern — `command: "npx"`, `args: ["-y", "@thebeachlab/mops"]`. Any client that speaks MCP over stdio works.
 
-```json
-{
-  "mcpServers": {
-    "mods": {
-      "command": "node",
-      "args": ["/absolute/path/to/mods-mcp/src/server.js"]
-    }
-  }
-}
-```
+### Optional flags
 
-Optional flags via args:
+Add to `args` after `"@thebeachlab/mops"`:
 - `"--mods-url", "https://localhost:8081"` — connect to a different Mods CE deployment
 - `"--headless"` — run browser in headless mode
+
+### Local development
+
+To run from a checkout instead of npm:
+
+```bash
+git clone https://github.com/TheBeachLab/mops.git
+cd mops
+npm install
+npm run setup    # installs Playwright Chromium
+npm start        # node src/server.js
+```
 
 ## MCP Tools
 
@@ -210,8 +230,10 @@ This repo includes a `/mods-workflow` slash command for Claude Code that teaches
 
 ## License
 
-[Mods CE](https://gitlab.fabcloud.org/pub/project/mods) is maintained by MIT's Center for Bits and Atoms. See the Mods project for its license terms.
+MOPS is MIT-licensed — see [LICENSE](LICENSE).
+
+[Mods CE](https://gitlab.fabcloud.org/pub/project/mods) is maintained by MIT's Center for Bits and Atoms. See the Mods project for its own license terms.
 
 ---
 
-Built with Claude Code (Opus 4.6) and the Model Context Protocol.
+Built with Claude Code (Opus 4.7) and the Model Context Protocol.
