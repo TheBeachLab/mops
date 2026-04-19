@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // server.js — MCP server for remote mods CE interaction
 
-import { stat, readFile, writeFile, mkdir } from 'node:fs/promises';
-import { extname, join } from 'node:path';
+import { stat, readFile, writeFile, mkdir, readdir } from 'node:fs/promises';
+import { extname, join, dirname, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -191,7 +191,7 @@ let loadedProgram = null;
 let lastLoadedFile = null;
 
 // --- MCP Server ---
-const mcpServer = new McpServer({ name: 'mops', version: '0.2.0' });
+const mcpServer = new McpServer({ name: 'mops', version: '0.4.0' });
 
 // Wrap tool registration so every tool call is logged with args, duration,
 // and result/error. Output goes to stderr (MCP convention) and is captured
@@ -625,7 +625,11 @@ mcpServer.tool('load_file',
   async ({ module_name, file_path }) => {
     if (!browser.isLaunched()) return { content: [{ type: 'text', text: 'Error: Browser not launched.' }], isError: true };
     try { await stat(file_path); } catch {
-      return { content: [{ type: 'text', text: `Error: File not found: ${file_path}` }], isError: true };
+      const ctx = await buildMissingFileContext(file_path);
+      return {
+        content: [{ type: 'text', text: JSON.stringify({ error: `File not found: ${file_path}`, ...ctx }, null, 2) }],
+        isError: true
+      };
     }
     lastLoadedFile = file_path;
     const ext = extname(file_path).toLowerCase();
@@ -887,6 +891,34 @@ function composeOk(payload) {
   return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
 }
 
+// On file-not-found, surface the parent directory contents so the LLM can
+// recover from near-miss filenames (e.g. "version 2.png" vs "version2.png")
+// instead of the server guessing with ad-hoc heuristics.
+async function buildMissingFileContext(file_path) {
+  const dir = dirname(file_path);
+  const wanted = basename(file_path);
+  let entries = [];
+  let directory_exists = true;
+  try {
+    entries = (await readdir(dir)).filter(f => !f.startsWith('.'));
+  } catch {
+    directory_exists = false;
+  }
+  const MAX_ENTRIES = 50;
+  const truncated = entries.length > MAX_ENTRIES;
+  return {
+    wanted_basename: wanted,
+    directory: dir,
+    directory_exists,
+    entries: entries.slice(0, MAX_ENTRIES),
+    entries_truncated: truncated,
+    total_entries: entries.length,
+    hint: directory_exists
+      ? 'If one of these is clearly the intended file, retry with its exact name. If ambiguous, ask the user which one they meant. If none match, tell the user the file isn\'t there.'
+      : 'The directory itself does not exist. Ask the user where the file actually lives.'
+  };
+}
+
 // Shared DPI-from-physical-size logic used by both set_physical_size and setup_cut.
 async function applyPhysicalSize(state, filePath, size) {
   const ext = extname(filePath).toLowerCase();
@@ -1115,7 +1147,10 @@ mcpServer.tool('setup_cut',
     if (!browser.isLaunched()) return composeError('precondition', 'Browser not launched');
 
     try { await stat(file_path); }
-    catch { return composeError('load_file', `File not found: ${file_path}`); }
+    catch {
+      const details = await buildMissingFileContext(file_path);
+      return composeError('load_file', `File not found: ${file_path}`, { details });
+    }
 
     const ext = extname(file_path).toLowerCase();
     if (ext !== '.png' && ext !== '.svg') {
