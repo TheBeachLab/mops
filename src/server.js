@@ -1054,7 +1054,7 @@ mcpServer.tool('get_job_status',
 // --- send_job ---
 
 mcpServer.tool('send_job',
-  'Composite send-to-machine: toggles on/off gate if present, connects device, calculates toolpath, verifies ready state, and clicks send. Returns {status, device, ...} or {status: "failed", at_step, reason}.',
+  'Composite send-to-machine: toggles on/off gate if present, ensures the device is acquired (not just granted), calculates toolpath, sends, and verifies the toolpath was consumed. Success requires the lower toggle button to read "waiting for file" post-click. Returns {status: "sent", device, send_button_label_after} or {status: "failed", at_step, reason}.',
   {
     skip_calculate: z.boolean().optional().default(false).describe('Skip the calculate step (toolpath already calculated)')
   },
@@ -1066,6 +1066,12 @@ mcpServer.tool('send_job',
     const outputMod = findOutputSendModule(state);
     if (!outputMod) return composeError('find_output', 'No WebUSB/WebSerial output module found in loaded program');
 
+    // The WebUSB output module has three buttons: "Get Device" / "Forget" (top
+    // row, static labels) and a lower button that toggles between "send file"
+    // (toolpath ready) and "waiting for file" (no toolpath / toolpath consumed).
+    // The toggle is the only state-bearing button; identify it by label, never by index.
+    const findSendToggle = (mod) => mod?.buttons?.find(b => /send file|waiting for file/i.test(b)) || null;
+
     // Step 1: on/off gate (if present)
     const gate = findOnOffGate(state, outputMod.id);
     if (gate) {
@@ -1076,19 +1082,25 @@ mcpServer.tool('send_job',
       }
     }
 
-    // Step 2: connect device if not already granted
+    // Step 2: ensure the device is *acquired*, not just granted.
+    // navigator.usb.getDevices() returns persistently granted devices (kept by
+    // ~/.mops/chrome-data/ across sessions), which is not the same as mods
+    // having an open USB handle. USBDevice.opened is the W3C-spec probe for
+    // active acquisition, populated into each entry by getGrantedDevices().
     let granted = await browser.getGrantedDevices();
-    if (granted.length === 0) {
+    let acquired = granted.find(d => d.opened === true);
+    if (!acquired) {
       const r = await browser.clickModuleButton(outputMod.id, 'get device');
-      if (r.error) return composeError('get_device_click', r.error);
-      // CDP auto-selects granted devices; give the picker a beat to resolve.
+      if (r.error) return composeError('click_get_device', r.error);
+      // CDP auto-selects from the device picker; give it a beat to resolve.
       await new Promise(res => setTimeout(res, 1500));
       granted = await browser.getGrantedDevices();
+      acquired = granted.find(d => d.opened === true);
     }
-    if (granted.length === 0) {
-      return composeError('verify_device', 'No devices found after Get Device. Plug the machine in and grant access via the browser picker.');
+    if (!acquired) {
+      return composeError('verify_device', 'No device acquired after Get Device click. Plug the machine in and grant access via the browser picker, or check that the device is powered on.', { granted_devices: granted });
     }
-    const device = granted[0].name;
+    const device = acquired.name;
 
     // Step 3: calculate toolpath
     if (!skip_calculate) {
@@ -1100,31 +1112,36 @@ mcpServer.tool('send_job',
       await browser.waitForProcessingSignal({ timeout: 30000 });
     }
 
-    // Step 4: verify button flipped to "send file"
+    // Step 4: verify the lower toggle reads "send file" (toolpath ready)
     state = await browser.getProgramState();
-    const outputAfterCalc = state.find(m => m.id === outputMod.id);
-    const sendLabel = outputAfterCalc?.buttons.find(b => /send file/i.test(b));
-    if (!sendLabel) {
-      const current = outputAfterCalc?.buttons[0] || 'unknown';
-      return composeError('verify_send_ready', `Expected "send file" button, got "${current}". Toolpath may not have reached the output module.`, { current_label: current });
+    const toggleBefore = findSendToggle(state.find(m => m.id === outputMod.id));
+    if (!toggleBefore || !/send file/i.test(toggleBefore)) {
+      return composeError('verify_send_ready', `Expected lower toggle to read "send file", got "${toggleBefore || 'none'}". Toolpath may not have reached the output module.`, { send_button_label: toggleBefore });
     }
 
     // Step 5: click send
     const clickResult = await browser.clickModuleButton(outputMod.id, 'send file');
-    if (clickResult.error) return composeError('send_click', clickResult.error);
+    if (clickResult.error) return composeError('click_send_file', clickResult.error);
 
-    // Step 6: verify — if label reverts to "waiting for file", the click didn't register data
+    // Step 6: verify the toolpath was consumed.
+    // Post-click contract: lower toggle reverts to "waiting for file" iff the
+    // toolpath was actually transmitted. If it still reads "send file", the
+    // click was a silent no-op (cutter did not receive data).
     await new Promise(res => setTimeout(res, 800));
     state = await browser.getProgramState();
-    const outputAfterSend = state.find(m => m.id === outputMod.id);
-    const afterLabel = outputAfterSend?.buttons[0] || '';
-    const bounced = /waiting for file/i.test(afterLabel);
+    const toggleAfter = findSendToggle(state.find(m => m.id === outputMod.id)) || '';
+
+    if (!/waiting for file/i.test(toggleAfter)) {
+      return composeError('verify_consumed', `Send did not consume toolpath. Lower toggle still reads "${toggleAfter || 'unknown'}" (expected "waiting for file"). The cutter likely did not receive data — try unplugging and replugging the device.`, {
+        device,
+        send_button_label_after: toggleAfter
+      });
+    }
 
     return composeOk({
       status: 'sent',
       device,
-      button_label_after: afterLabel,
-      ...(bounced ? { warning: 'Button reverted to "waiting for file" — send may have failed silently. Re-run send_job or verify the machine received data.' } : {})
+      send_button_label_after: toggleAfter
     });
   }
 );

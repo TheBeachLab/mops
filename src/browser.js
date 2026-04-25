@@ -141,6 +141,10 @@ export function getDiscoveredDevices() {
   return discoveredDevices;
 }
 
+// `opened` distinguishes granted (persistent permission) from acquired
+// (USBDevice.open() called by mods for the current page lifetime). Required
+// because the persistent profile keeps grants forever, so length>0 alone
+// does not prove mods has the device handle.
 export async function getGrantedDevices() {
   if (!page) return [];
   try {
@@ -154,6 +158,7 @@ export async function getGrantedDevices() {
             vendorId: d.vendorId,
             productId: d.productId,
             serialNumber: d.serialNumber || null,
+            opened: d.opened === true,
             type: 'usb'
           });
         }
