@@ -27,19 +27,6 @@ jobs:
       - name: Upgrade npm
         run: npm install -g npm@latest
 
-      # Diagnostic: prints the claims GitHub will assert in the OIDC token sent
-      # to npm. Compare against the npm trusted-publisher rule to find any
-      # mismatch (capitalization, workflow filename, environment, etc.).
-      # Safe to log: the claims segment is not a secret; only the full signed
-      # JWT would be sensitive, and we never print that.
-      - name: Debug OIDC claims (npm audience)
-        run: |
-          TOKEN=$(curl -sLS \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=npm:registry.npmjs.org" \
-            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" | jq -r .value)
-          echo "=== OIDC claims (npm audience) ==="
-          echo "$TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null | jq .
-
       - name: Verify tag matches package.json version
         env:
           REF_NAME: ${{ github.ref_name }}
@@ -56,4 +43,4 @@ jobs:
         run: npm ci
 
       - name: Publish
-        run: npm publish --access public --provenance --loglevel verbose
+        run: npm publish --access public --provenance
