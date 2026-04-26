@@ -1054,25 +1054,51 @@ mcpServer.tool('get_job_status',
 // --- send_job ---
 
 mcpServer.tool('send_job',
-  'Composite send-to-machine: toggles on/off gate if present, ensures the device is acquired (not just granted), calculates toolpath, sends, and verifies the toolpath was consumed. Success requires the lower toggle button to read "waiting for file" post-click. Returns {status: "sent", device, send_button_label_after} or {status: "failed", at_step, reason}.',
+  'Composite send-to-machine. Idempotent: callable from any post-setup state — walks back through preconditions (gate, device acquisition, toolpath calculation), auto-fixes what is missing, then sends. Returns {status: "sent", device, send_button_label_after} on confirmed delivery (lower toggle flipped to "waiting for file"), or {status: "failed", at_step, reason, next_action?} when a precondition cannot be auto-recovered. Takes no parameters; toolpath state is read from the lower toggle button.',
   {
-    skip_calculate: z.boolean().optional().default(false).describe('Skip the calculate step (toolpath already calculated)')
+    // Accepted but ignored — kept for one version so existing callers passing
+    // {skip_calculate: true} don't break. Calculate is now state-driven.
+    skip_calculate: z.boolean().optional().describe('DEPRECATED: ignored. send_job now auto-detects toolpath state from the lower toggle.')
   },
-  async ({ skip_calculate }) => {
-    if (!browser.isLaunched()) return composeError('precondition', 'Browser not launched');
-    if (!loadedProgram) return composeError('precondition', 'No program loaded');
+  async () => {
+    if (!browser.isLaunched()) {
+      return composeError('launch_browser', 'Browser not launched.', { next_action: 'launch_browser' });
+    }
+    if (!loadedProgram) {
+      return composeError('load_program', 'No program loaded.', { next_action: 'setup_cut or load_program' });
+    }
 
     let state = await browser.getProgramState();
     const outputMod = findOutputSendModule(state);
-    if (!outputMod) return composeError('find_output', 'No WebUSB/WebSerial output module found in loaded program');
+    if (!outputMod) {
+      return composeError('find_output', 'No WebUSB/WebSerial output module in loaded program — wrong program for this machine?', { program: loadedProgram });
+    }
 
     // The WebUSB output module has three buttons: "Get Device" / "Forget" (top
     // row, static labels) and a lower button that toggles between "send file"
     // (toolpath ready) and "waiting for file" (no toolpath / toolpath consumed).
     // The toggle is the only state-bearing button; identify it by label, never by index.
     const findSendToggle = (mod) => mod?.buttons?.find(b => /send file|waiting for file/i.test(b)) || null;
+    const readToggle = async () => findSendToggle(
+      (await browser.getProgramState()).find(m => m.id === outputMod.id)
+    );
 
-    // Step 1: on/off gate (if present)
+    // Poll toggle until it matches `desired` regex, or timeout. Returns final value.
+    // Mods updates the toggle async after a click; fixed sleeps produced false
+    // negatives where the data went through but the UI hadn't caught up yet.
+    const pollToggleUntil = async (desired, timeoutMs, intervalMs = 250) => {
+      const deadline = Date.now() + timeoutMs;
+      let last = await readToggle();
+      while (!desired.test(last || '') && Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, intervalMs));
+        last = await readToggle();
+      }
+      return last;
+    };
+
+    // --- Convergent preconditions: walk back, fix what's fixable ---
+
+    // Gate: ensure on (idempotent — skips if already on).
     const gate = findOnOffGate(state, outputMod.id);
     if (gate) {
       const gateCheckbox = gate.params.find(p => p.type === 'checkbox');
@@ -1082,59 +1108,66 @@ mcpServer.tool('send_job',
       }
     }
 
-    // Step 2: ensure the device is *acquired*, not just granted.
-    // navigator.usb.getDevices() returns persistently granted devices (kept by
-    // ~/.mops/chrome-data/ across sessions), which is not the same as mods
-    // having an open USB handle. USBDevice.opened is the W3C-spec probe for
-    // active acquisition, populated into each entry by getGrantedDevices().
+    // Device: ensure acquired (USBDevice.opened === true), not just granted.
+    // Persistent profile keeps grants forever; opened reflects active session.
     let granted = await browser.getGrantedDevices();
     let acquired = granted.find(d => d.opened === true);
     if (!acquired) {
       const r = await browser.clickModuleButton(outputMod.id, 'get device');
       if (r.error) return composeError('click_get_device', r.error);
-      // CDP auto-selects from the device picker; give it a beat to resolve.
+      // CDP auto-selects from the picker; give it a beat to resolve and mods to open().
       await new Promise(res => setTimeout(res, 1500));
       granted = await browser.getGrantedDevices();
       acquired = granted.find(d => d.opened === true);
     }
     if (!acquired) {
-      return composeError('verify_device', 'No device acquired after Get Device click. Plug the machine in and grant access via the browser picker, or check that the device is powered on.', { granted_devices: granted });
+      return composeError('verify_device', 'No device acquired after Get Device click. Check cable + power + that the machine is the granted one.', {
+        granted_devices: granted.map(d => d.name),
+        next_action: 'verify cable and power, then retry send_job'
+      });
     }
     const device = acquired.name;
 
-    // Step 3: calculate toolpath
-    if (!skip_calculate) {
+    // Toolpath: read toggle to decide whether calculate is needed.
+    // "send file" → toolpath ready, skip to send. "waiting for file" or missing → calculate.
+    let toggle = findSendToggle(state.find(m => m.id === outputMod.id));
+    if (!/send file/i.test(toggle || '')) {
       const calcMod = findCalculateModule(state);
-      if (!calcMod) return composeError('find_calculator', 'No module with a "calculate" button found');
+      if (!calcMod) {
+        return composeError('find_calculator', 'No "calculate" button found in program. Source file may not be loaded.', {
+          next_action: 'load_file or setup_cut'
+        });
+      }
       browser.clearDownloads();
       const r = await browser.clickModuleButton(calcMod.id, 'calculate');
       if (r.error) return composeError('calculate_click', r.error);
       await browser.waitForProcessingSignal({ timeout: 30000 });
+
+      // Poll for toggle to flip to "send file" — gives mods up to 3s beyond
+      // the processing signal to update its UI before we read it.
+      toggle = await pollToggleUntil(/send file/i, 3000);
+      if (!/send file/i.test(toggle || '')) {
+        return composeError('verify_send_ready', `Toolpath not ready after calculate. Toggle reads "${toggle || 'none'}" (expected "send file"). Source file may not be loaded, or calculation produced no output.`, {
+          send_button_label: toggle,
+          next_action: 'check file is loaded and program inputs are valid'
+        });
+      }
     }
 
-    // Step 4: verify the lower toggle reads "send file" (toolpath ready)
-    state = await browser.getProgramState();
-    const toggleBefore = findSendToggle(state.find(m => m.id === outputMod.id));
-    if (!toggleBefore || !/send file/i.test(toggleBefore)) {
-      return composeError('verify_send_ready', `Expected lower toggle to read "send file", got "${toggleBefore || 'none'}". Toolpath may not have reached the output module.`, { send_button_label: toggleBefore });
-    }
-
-    // Step 5: click send
+    // Click send.
     const clickResult = await browser.clickModuleButton(outputMod.id, 'send file');
     if (clickResult.error) return composeError('click_send_file', clickResult.error);
 
-    // Step 6: verify the toolpath was consumed.
-    // Post-click contract: lower toggle reverts to "waiting for file" iff the
-    // toolpath was actually transmitted. If it still reads "send file", the
-    // click was a silent no-op (cutter did not receive data).
-    await new Promise(res => setTimeout(res, 800));
-    state = await browser.getProgramState();
-    const toggleAfter = findSendToggle(state.find(m => m.id === outputMod.id)) || '';
-
-    if (!/waiting for file/i.test(toggleAfter)) {
-      return composeError('verify_consumed', `Send did not consume toolpath. Lower toggle still reads "${toggleAfter || 'unknown'}" (expected "waiting for file"). The cutter likely did not receive data — try unplugging and replugging the device.`, {
+    // Verify consumption — poll up to 5s for toggle to flip to "waiting for file".
+    // Real WebUSB transfers regularly take longer than 800ms; the previous
+    // fixed sleep produced false negatives where the cutter actually started
+    // cutting but the toggle hadn't updated when we read it.
+    const toggleAfter = await pollToggleUntil(/waiting for file/i, 5000);
+    if (!/waiting for file/i.test(toggleAfter || '')) {
+      return composeError('verify_consumed', `Send did not consume toolpath within 5s. Toggle reads "${toggleAfter || 'unknown'}" (expected "waiting for file"). Cutter may not have received data.`, {
         device,
-        send_button_label_after: toggleAfter
+        send_button_label_after: toggleAfter,
+        next_action: 'check cutter power, USB cable, and that machine is ready to receive'
       });
     }
 
