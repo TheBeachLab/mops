@@ -604,7 +604,23 @@ mcpServer.tool('trigger_action', 'Click a button in a module (calculate, view, e
     const found = await findModule(name, id);
     if (found.error) return { content: [{ type: 'text', text: found.error }], isError: true };
     const result = await browser.clickModuleButton(found.module.id, action);
-    // Wait for processing signal (moduleOutput on new mods, download or 3s fallback on old)
+
+    // If the click errored, the action did not happen — skip the processing
+    // signal wait (saves ~3s timeout). Suggest next_action when exactly one
+    // OTHER module in the loaded program has the requested button. The
+    // suggestion is derived from program state, never hardcoded — toolpath
+    // module names differ per program (cut raster / mill raster / mill 3D…).
+    if (result.error) {
+      const state = await browser.getProgramState();
+      const matches = findModulesWithButton(state, action).filter(m => m.id !== found.module.id);
+      if (matches.length === 1) {
+        result.next_action = `trigger_action with module_name='${matches[0].name}'`;
+      }
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: true };
+    }
+
+    // Click succeeded — wait for processing signal (moduleOutput on new mods,
+    // download or 3s fallback on old).
     const outputEvent = await browser.waitForProcessingSignal({ timeout: 30000 });
     if (outputEvent) {
       result.completedModule = outputEvent.module;
@@ -672,17 +688,17 @@ mcpServer.tool('set_physical_size',
     unit: z.enum(['mm', 'cm', 'in']).default('mm').describe('Unit for width/height')
   },
   async ({ width, height, unit }) => {
-    if (!browser.isLaunched()) return { content: [{ type: 'text', text: 'Error: Browser not launched.' }], isError: true };
-    if (!loadedProgram) return { content: [{ type: 'text', text: 'Error: No program loaded.' }], isError: true };
-    if (!lastLoadedFile) return { content: [{ type: 'text', text: 'Error: No image file loaded. Use load_file first.' }], isError: true };
+    if (!browser.isLaunched()) return composeError('launch_browser', 'Browser not launched.', { next_action: 'launch_browser' });
+    if (!loadedProgram) return composeError('load_program', 'No program loaded.', { next_action: 'setup_cut or load_program' });
+    if (!lastLoadedFile) return composeError('load_file', 'No image file loaded.', { next_action: 'load_file' });
 
     // Read pixel dimensions directly from the file (PNG only — DPI controls physical size)
     const ext = extname(lastLoadedFile).toLowerCase();
     if (ext !== '.png') {
-      return { content: [{ type: 'text', text: `Error: set_physical_size only works with PNG files. For vector formats (DXF, HPGL, SVG), physical dimensions come from the file data — DPI only controls rasterization resolution.` }], isError: true };
+      return composeError('unsupported_format', `set_physical_size only works with PNG files. For vector formats (DXF, HPGL, SVG), physical dimensions come from the file data — DPI only controls rasterization resolution.`, { file: lastLoadedFile });
     }
     const dims = await readImageDimensions(lastLoadedFile);
-    if (!dims) return { content: [{ type: 'text', text: `Error: Cannot read dimensions from ${lastLoadedFile}` }], isError: true };
+    if (!dims) return composeError('read_dimensions', `Cannot read dimensions from ${lastLoadedFile}`, { file: lastLoadedFile });
 
     // Find the reader module — try name first, fall back to any module with DPI
     const readerNames = ['read', 'png', 'svg', 'image'];
@@ -693,7 +709,7 @@ mcpServer.tool('set_physical_size',
       found = null;
     }
     const dpiModule = found ? found.module : null;
-    if (!dpiModule) return { content: [{ type: 'text', text: 'Error: No reader module with a DPI parameter found in the loaded program.' }], isError: true };
+    if (!dpiModule) return composeError('find_reader', 'No reader module with a DPI parameter found in the loaded program.');
 
     // Calculate exact DPI from desired width
     const widthInches = unit === 'mm' ? width / 25.4 : unit === 'cm' ? width / 2.54 : width;
@@ -701,7 +717,7 @@ mcpServer.tool('set_physical_size',
 
     // Set DPI (3 decimal places avoids floating point noise)
     const setResult = await browser.setModuleInput(dpiModule.id, 'dpi', newDpi.toFixed(3));
-    if (setResult.error) return { content: [{ type: 'text', text: `Error setting DPI: ${setResult.error}` }], isError: true };
+    if (setResult.error) return composeError('set_dpi', setResult.error, { module: dpiModule.name });
 
     // Confirmation with resulting dimensions
     const rW_mm = (25.4 * dims.width / newDpi).toFixed(1);
@@ -859,6 +875,18 @@ function findReaderModule(state) {
     if (m) return m;
   }
   return state.find(m => m.params.some(p => p.label.toLowerCase().includes('dpi'))) || null;
+}
+
+// Find every module in `state` that has a button whose label contains
+// `buttonText` (case-insensitive substring match — same semantics as
+// clickModuleButton). Used to suggest `next_action` recovery hints when a
+// button isn't on the requested module but exists elsewhere in the program.
+// Toolpath module names differ per program (`cut raster` for vinyl cutters,
+// `mill raster` for mills), so the suggestion must be derived from the loaded
+// program's modules, never hardcoded.
+function findModulesWithButton(state, buttonText) {
+  const target = buttonText.toLowerCase();
+  return state.filter(m => m.buttons?.some(b => b.toLowerCase().includes(target)));
 }
 
 function matchProfileMachine(profile, hint) {
